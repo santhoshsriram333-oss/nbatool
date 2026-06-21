@@ -9,7 +9,12 @@ import functools
 
 import pandas as pd
 from nba_api.stats.static import players, teams
-from nba_api.stats.endpoints import leagueseasonmatchups, shotchartdetail
+from nba_api.stats.endpoints import (
+    leagueseasonmatchups,
+    shotchartdetail,
+    commonteamroster,
+    leaguedashplayerstats,
+)
 
 # only keep matchups with 40+ possessions — anything smaller gave really noisy,
 # misleading per-possession numbers 
@@ -230,6 +235,63 @@ def scouting_summary(player_name, team_name, season):
         "make_pct_by_zone": make_by_zone.to_dict(),
         "make_pct_by_area": make_by_area.to_dict(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Roster + top scorer
+# ---------------------------------------------------------------------------
+# The app uses these so the user picks players from dropdowns instead of typing
+# names. Both go through cached_pull, so a roster/scoring table is only fetched
+# from stats.nba.com once per team+season and then read off disk after that.
+def get_roster(team_name, season):
+    """Return a team's roster for the season as a DataFrame.
+
+    The handy column for the UI is "PLAYER" (the player's display name).
+    """
+    team_id = get_team_id(team_name)
+
+    def fetch():
+        r = commonteamroster.CommonTeamRoster(
+            team_id=team_id,
+            season=season,
+            timeout=TIMEOUT,
+        )
+        return r.get_data_frames()[0]
+
+    return cached_pull(f"roster_{team_id}_{season}", fetch)
+
+
+def get_team_player_scoring(team_name, season):
+    """Per-game player stats for everyone who logged minutes for this team.
+
+    I pull this separately from the roster because it's where the points-per-game
+    (PTS, in PerGame mode) lives — that's what I use to find the top scorer.
+    """
+    team_id = get_team_id(team_name)
+
+    def fetch():
+        s = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=season,
+            per_mode_detailed="PerGame",
+            team_id_nullable=team_id,
+            timeout=TIMEOUT,
+        )
+        return s.get_data_frames()[0]
+
+    return cached_pull(f"teamscoring_{team_id}_{season}", fetch)
+
+
+def get_top_scorer(team_name, season):
+    """Name of the team's highest points-per-game player that season.
+
+    Used to pre-select a sensible default in the dropdowns. Returns None if the
+    scoring table comes back empty (e.g. a season with no data yet).
+    """
+    df = get_team_player_scoring(team_name, season)
+    if df.empty:
+        return None
+    top = df.sort_values("PTS", ascending=False).iloc[0]
+    return top["PLAYER_NAME"]
 
 
 # ---------------------------------------------------------------------------
