@@ -295,6 +295,55 @@ def get_top_scorer(team_name, season):
 
 
 # ---------------------------------------------------------------------------
+# Player -> team mapping (so the app can tell whose defenders are whose)
+# ---------------------------------------------------------------------------
+def get_team_abbreviation(team_name):
+    """Three-letter abbreviation for a team's full name (offline static data)."""
+    team_id = get_team_id(team_name)
+    for t in teams.get_teams():
+        if t["id"] == team_id:
+            return t["abbreviation"]
+    raise ValueError(f"No abbreviation found for team: {team_name!r}")
+
+
+def _league_player_stats(season):
+    """Whole-league per-player stats for the season (used for the team map)."""
+    def fetch():
+        s = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=season,
+            per_mode_detailed="Totals",
+            timeout=TIMEOUT,
+        )
+        return s.get_data_frames()[0]
+
+    return cached_pull(f"leaguestats_{season}", fetch)
+
+
+def get_player_team_map(season):
+    """Map every player's name -> their team abbreviation for the season.
+
+    A traded player can show up more than once; I keep the row where he played
+    the most games (GP), so he maps to the team he actually spent most of the
+    season with rather than a random stint.
+    """
+    df = _league_player_stats(season)
+    if df.empty:
+        return {}
+    keep_idx = df.groupby("PLAYER_NAME")["GP"].idxmax()
+    best = df.loc[keep_idx]
+    return dict(zip(best["PLAYER_NAME"], best["TEAM_ABBREVIATION"]))
+
+
+def annotate_matchups_with_team(matchups_df, season):
+    """Add a TEAM column to a get_matchups() frame by looking up each defender's
+    team. Defenders we can't place (name mismatch, etc.) get '—'."""
+    team_map = get_player_team_map(season)
+    out = matchups_df.copy()
+    out["TEAM"] = out["DEF_PLAYER_NAME"].map(lambda name: team_map.get(name, "—"))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Quick manual test — run this file directly to check all four functions work.
 # I use Jokić because his data is rich enough to eyeball whether the numbers
 # look sane.
