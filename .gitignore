@@ -1,0 +1,12 @@
+# Cached API pulls — regenerated on demand, no need to track
+cache/
+
+# Python virtual environment
+.venv/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Local Claude Code settings
+.claude/

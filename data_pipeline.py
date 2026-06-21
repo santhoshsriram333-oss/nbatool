@@ -1,0 +1,285 @@
+# --- Matchup Advantage: data pipeline ---
+# This is the main data layer for my NBA scouting tool. It started as
+# sanity_check.py, but I pulled the useful bits into proper functions here and
+# added caching + retries so the live demo doesn't fall over.
+
+import os
+import time
+import functools
+
+import pandas as pd
+from nba_api.stats.static import players, teams
+from nba_api.stats.endpoints import leagueseasonmatchups, shotchartdetail
+
+# only keep matchups with 40+ possessions — anything smaller gave really noisy,
+# misleading per-possession numbers 
+POSS_FLOOR = 40
+TIMEOUT = 60
+
+# I save every API pull to disk here. stats.nba.com is slow and sometimes times
+# out, so once I've fetched something I never want to hit the network for it
+# again — repeat runs (and the demo) just read the cached file.
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Caching + retry helpers
+# ---------------------------------------------------------------------------
+def _cache_path(key):
+    # turn the key into a filename that's safe on disk ,just swap anything
+    # that isn't a letter/number for an underscore.
+    safe = "".join(c if c.isalnum() else "_" for c in key)
+    return os.path.join(CACHE_DIR, safe + ".pkl")
+
+
+def cached_pull(key, fetch_fn):
+    """If I've already pulled this data, load it from disk. Otherwise go fetch
+    it, save it, and hand it back.
+
+    fetch_fn is just a little no-argument function that does the actual API
+    call and returns a DataFrame. i keep that separate so the caching logic
+    doesn't care which endpoint it's talking to.
+    """
+    path = _cache_path(key)
+    if os.path.exists(path):
+        return pd.read_pickle(path)
+
+    df = _with_retry(fetch_fn)
+    df.to_pickle(path)
+    return df
+
+
+def _with_retry(fetch_fn, attempts=2, delay=2):
+    # the NBA stats server flakes out fairly often, but usually it works on the
+    # second try. So I retry exactly once, enough to ride out a random timeout
+    # without hanging forever if the site is genuinely down.
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch_fn()
+        except Exception as err:  # nba_api can throw a bunch of different errors, so catch broadly
+            last_err = err
+            print(f"  [retry] attempt {attempt}/{attempts} failed: {err}")
+            if attempt < attempts:
+                time.sleep(delay)
+    raise last_err
+
+
+# ---------------------------------------------------------------------------
+# Turning names into IDs (this part is all offline — no internet needed)
+# ---------------------------------------------------------------------------
+# nba_api ships the player/team lists with the package, so I can look these up
+# locally. The lru_cache just means a repeated name lookup is basically free.
+@functools.lru_cache(maxsize=None)
+def get_player_id(name):
+    """Take a player's full name and give back their NBA id."""
+    matches = players.find_players_by_full_name(name)
+    if not matches:
+        raise ValueError(f"No player found for name: {name!r}")
+    return matches[0]["id"]
+
+
+@functools.lru_cache(maxsize=None)
+def get_team_id(name):
+    """Take a team name and give back its NBA id.
+
+    I wanted to be forgiving about how the team is typed, so it'll match the
+    full name, nickname, city, or the 3-letter abbreviation (case doesn't
+    matter).
+    """
+    needle = name.strip().lower()
+    for t in teams.get_teams():
+        candidates = {
+            t["full_name"].lower(),
+            t["nickname"].lower(),
+            t["city"].lower(),
+            t["abbreviation"].lower(),
+        }
+        if needle in candidates:
+            return t["id"]
+    # if none of those matched exactly, try a looser "is this text somewhere in
+    # the full name" check before giving up.
+    for t in teams.get_teams():
+        if needle in t["full_name"].lower():
+            return t["id"]
+    raise ValueError(f"No team found for name: {name!r}")
+
+
+# ---------------------------------------------------------------------------
+# Matchup data
+# ---------------------------------------------------------------------------
+def get_matchups(off_player_name, season):
+    """Get who guarded this player and how he did against each defender.
+
+    This pulls the season matchup data, trims it to the columns I care about,
+    throws out the tiny-sample defenders, and works out points per possession
+    so I can rank matchups by how well he actually scored against each guy.
+
+    # NOTE for Aditi: two things to sanity-check here. (1) the >= 40 possession
+    # floor — is 40 the right cutoff, or are we throwing away defenders we'd
+    # actually want to see? (2) I sort by PTS_PER_POSS descending so the
+    # *easiest* matchups land at the top of the table — confirm that's the
+    # order we want for the scouting view (top = attack, bottom = avoid).
+    """
+    player_id = get_player_id(off_player_name)
+
+    # wrap the actual API call so cached_pull can retry it / cache the result
+    def fetch():
+        mu = leagueseasonmatchups.LeagueSeasonMatchups(
+            off_player_id_nullable=player_id,
+            season=season,
+            per_mode_simple="Totals",
+            timeout=TIMEOUT,
+        )
+        return mu.get_data_frames()[0]
+
+    df = cached_pull(f"matchups_{player_id}_{season}", fetch)
+
+    keep = ["DEF_PLAYER_NAME", "PARTIAL_POSS", "PLAYER_PTS",
+            "MATCHUP_FG_PCT", "MATCHUP_FG3_PCT"]
+    clean = df[keep].copy()
+    clean = clean[clean["PARTIAL_POSS"] >= POSS_FLOOR]
+    # points per possession is the fairest way to compare matchups — raw points
+    # just rewards whoever he happened to face the most.
+    clean["PTS_PER_POSS"] = (clean["PLAYER_PTS"] / clean["PARTIAL_POSS"]).round(3)
+    # sort best-scoring matchups first; reset_index so the row numbers are tidy
+    clean = clean.sort_values("PTS_PER_POSS", ascending=False).reset_index(drop=True)
+    return clean
+
+
+# ---------------------------------------------------------------------------
+# Shot-chart data
+# ---------------------------------------------------------------------------
+def get_shots(player_name, team_name, season):
+    """Pull every shot this player took for the given team that season.
+
+    The raw shot-chart endpoint returns a ton of columns; I only keep the ones
+    I need for the hot/cold map and the tendency stats — where the shot was
+    (LOC_X/LOC_Y, the zones, distance), whether it went in, and what kind of
+    shot it was.
+    """
+    player_id = get_player_id(player_name)
+    team_id = get_team_id(team_name)
+
+    # same pattern as get_matchups — keep the live call in its own function
+    def fetch():
+        sc = shotchartdetail.ShotChartDetail(
+            team_id=team_id,
+            player_id=player_id,
+            season_nullable=season,
+            season_type_all_star="Regular Season",
+            context_measure_simple="FGA",
+            timeout=TIMEOUT,
+        )
+        return sc.get_data_frames()[0]
+
+    df = cached_pull(f"shots_{player_id}_{team_id}_{season}", fetch)
+
+    keep = ["LOC_X", "LOC_Y", "SHOT_MADE_FLAG", "SHOT_TYPE",
+            "SHOT_ZONE_BASIC", "SHOT_ZONE_AREA", "ACTION_TYPE", "SHOT_DISTANCE"]
+    return df[keep].copy()
+
+
+# ---------------------------------------------------------------------------
+# Scouting summary
+# ---------------------------------------------------------------------------
+def scouting_summary(player_name, team_name, season):
+    """Boil a player's shot data down into a few scouting takeaways.
+
+    Gives back a dict with the basics (total shots, average distance) plus his
+    tendencies: what kinds of shots he likes, and where on the floor he's
+    actually making them.
+
+    # NOTE for Aditi: please double-check the percentage math here. The two
+    # numbers mean different things and it's easy to mix them up:
+    #   - action_type_pct is "share of his shots" (counts that sum toward 100%
+    #     across all action types, and I only show the top 5).
+    #   - make_pct_by_zone / make_pct_by_area are "how often shots from there
+    #     went in" — each one is an independent FG% for that area, so they do
+    #     NOT add up to 100%. Want to make sure that distinction is right.
+    """
+    shots = get_shots(player_name, team_name, season)
+    total = len(shots)
+
+    # which shot types he goes to most — normalize=True turns the raw counts
+    # into fractions, then I scale to a percent and keep just the top 5.
+    action_pct = (
+        shots["ACTION_TYPE"].value_counts(normalize=True)
+        .mul(100).round(1).head(5)
+    )
+
+    # SHOT_MADE_FLAG is 1/0, so taking the mean of it per group is literally the
+    # make percentage for that group. Doing it once by basic zone, once by area.
+    make_by_zone = (
+        shots.groupby("SHOT_ZONE_BASIC")["SHOT_MADE_FLAG"]
+        .mean().mul(100).round(1).sort_values(ascending=False)
+    )
+    make_by_area = (
+        shots.groupby("SHOT_ZONE_AREA")["SHOT_MADE_FLAG"]
+        .mean().mul(100).round(1).sort_values(ascending=False)
+    )
+
+    return {
+        "player": player_name,
+        "team": team_name,
+        "season": season,
+        "total_shots": total,
+        "avg_shot_distance": round(shots["SHOT_DISTANCE"].mean(), 1),
+        "action_type_pct": action_pct.to_dict(),
+        "make_pct_by_zone": make_by_zone.to_dict(),
+        "make_pct_by_area": make_by_area.to_dict(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Quick manual test — run this file directly to check all four functions work.
+# I use Jokić because his data is rich enough to eyeball whether the numbers
+# look sane.
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    PLAYER = "Nikola Jokić"
+    TEAM = "Denver Nuggets"
+    SEASON = "2023-24"
+
+    print("=" * 70)
+    print(f"SCOUTING REPORT — {PLAYER} ({TEAM}, {SEASON})")
+    print("=" * 70)
+
+    # first check the two id lookups resolve
+    pid = get_player_id(PLAYER)
+    tid = get_team_id(TEAM)
+    print(f"\nPlayer ID: {pid}   Team ID: {tid}")
+
+    # matchups: print the best and worst defenders so I can compare the extremes
+    matchups = get_matchups(PLAYER, SEASON)
+    print(f"\nMatchups (>= {POSS_FLOOR} possessions): {len(matchups)} defenders")
+    print("\nMOST efficient matchups (attack these):")
+    print(matchups.head(5).to_string(index=False))
+    print("\nTOUGHEST matchups (slowed him down):")
+    print(matchups.tail(5).to_string(index=False))
+
+    # shots: just confirm we got rows back and the columns look right
+    shots = get_shots(PLAYER, TEAM, SEASON)
+    print(f"\nShot-chart rows: {len(shots)}")
+    print(shots.head().to_string(index=False))
+
+    # and finally the summary that ties the shot data into actual tendencies
+    summary = scouting_summary(PLAYER, TEAM, SEASON)
+    print("\n" + "-" * 70)
+    print("SCOUTING SUMMARY")
+    print("-" * 70)
+    print(f"Total shots: {summary['total_shots']}")
+    print(f"Avg shot distance: {summary['avg_shot_distance']} ft")
+
+    print("\n% of shots by ACTION_TYPE (top 5):")
+    for action, pct in summary["action_type_pct"].items():
+        print(f"  {pct:5.1f}%  {action}")
+
+    print("\nMake % by SHOT_ZONE_BASIC:")
+    for zone, pct in summary["make_pct_by_zone"].items():
+        print(f"  {pct:5.1f}%  {zone}")
+
+    print("\nMake % by SHOT_ZONE_AREA:")
+    for area, pct in summary["make_pct_by_area"].items():
+        print(f"  {pct:5.1f}%  {area}")
