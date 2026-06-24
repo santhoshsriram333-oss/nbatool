@@ -180,31 +180,51 @@ ACTUAL_BADGE = "✅ Actual matchup"
 PROJECTED_BADGE = "📊 Projected"
 
 
+def _pct_dict(d):
+    """Format a {label: number} dict of already-percentage values as clean
+    one-decimal percent strings, e.g. 61.8 -> '61.8%'."""
+    return {k: f"{v:.1f}%" for k, v in d.items()}
+
+
 def show_matchup_table(df, source_label=ACTUAL_BADGE):
     """Render an observed-matchup frame with friendly column names and a Source
-    badge on every row (or a note if empty)."""
+    badge on every row (or a note if empty). Numbers are formatted for display:
+    FG%/3PT% as one-decimal percentages, possessions to 1dp, pts/poss to 2dp."""
     if df.empty:
         st.caption("_No defenders in this group._")
         return
-    view = df[DISPLAY_COLS].rename(columns=COL_RENAME)
+    view = df[DISPLAY_COLS].rename(columns=COL_RENAME).copy()
+    view["Possessions guarded"] = view["Possessions guarded"].map(lambda v: f"{v:.1f}")
+    view["Points scored"] = view["Points scored"].map(lambda v: f"{v:.0f}")
+    view["Points per possession"] = view["Points per possession"].map(lambda v: f"{v:.2f}")
+    view["FG%"] = view["FG%"].map(lambda v: f"{v * 100:.1f}%")
+    view["3PT%"] = view["3PT%"].map(lambda v: f"{v * 100:.1f}%")
     view.insert(0, "Source", source_label)
     st.dataframe(view, use_container_width=True, hide_index=True)
 
 
 def show_projected_table(results, exclude_names=None):
-    """Render projected matchup dicts, each tagged with the Projected badge."""
+    """Render projected matchup dicts, each tagged with the Projected badge.
+
+    Drops players with no usable defensive data (rather than listing them as
+    Neutral / 0.00). If any were dropped, a small grey line notes the count."""
     exclude = exclude_names or set()
+    usable = [r for r in results if r["defender"] not in exclude]
+    excluded = sum(1 for r in usable if r.get("insufficient"))
     rows = [{
         "Source": PROJECTED_BADGE,
         "Defender": r["defender"],
         "Projection": r["label"],
-        "Edge score": r["score"],
+        # guard against "-0.00" from tiny negative scores
+        "Edge score": f"{(r['score'] if abs(r['score']) >= 0.005 else 0.0):.2f}",
         "Why": r["reason"],
-    } for r in results if r["defender"] not in exclude]
-    if not rows:
+    } for r in usable if not r.get("insufficient")]
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
         st.caption("_No projected matchups to show._")
-        return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if excluded:
+        st.caption(f"_{excluded} player(s) excluded — insufficient defensive data._")
 
 
 def lowest_make_area_weighted(shots):
@@ -325,13 +345,13 @@ with tab_defend:
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         st.markdown("**Top action types (% of shots)**")
-                        st.table({"%": summary["action_type_pct"]})
+                        st.table({"%": _pct_dict(summary["action_type_pct"])})
                     with c2:
                         st.markdown("**Make % by zone**")
-                        st.table({"Make %": summary["make_pct_by_zone"]})
+                        st.table({"Make %": _pct_dict(summary["make_pct_by_zone"])})
                     with c3:
                         st.markdown("**Make % by area**")
-                        st.table({"Make %": summary["make_pct_by_area"]})
+                        st.table({"Make %": _pct_dict(summary["make_pct_by_area"])})
 
                     st.markdown("### Shot chart")
                     chart_col, _ = st.columns([2, 1])

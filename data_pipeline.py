@@ -467,17 +467,22 @@ def project_matchup(attacker_name, attacker_team, defender_name, season):
     def_zones = defense.get(defender_name)
 
     result = {"defender": defender_name, "label": "Neutral",
-              "score": 0.0, "reason": ""}
+              "score": 0.0, "reason": "", "insufficient": False}
 
     if profile["total_shots"] == 0:
+        result["insufficient"] = True
         result["reason"] = f"No shot data for {attacker_name} — can't project."
         return result
     if not def_zones:
+        result["insufficient"] = True
         result["reason"] = f"No defensive profile for {defender_name} this season."
         return result
 
     # Weighted score = average of (zone plusminus) weighted by attacker shot share.
+    # `contrib` tracks each zone's signed push on the verdict (share x plusminus)
+    # so the reason can name the zone actually driving the result.
     score, weight = 0.0, 0.0
+    contrib = {}
     for zone in ZONE_DEFENSE_SPEC:
         share = profile.get(zone, {}).get("share", 0.0)
         zd = def_zones.get(zone)
@@ -485,6 +490,7 @@ def project_matchup(attacker_name, attacker_team, defender_name, season):
             continue
         score += share * zd["plusminus"]
         weight += share
+        contrib[zone] = share * zd["plusminus"]
     if weight > 0:
         score /= weight       # normalise so zones we lack defense data for don't dilute
     score = round(score, 4)
@@ -496,13 +502,17 @@ def project_matchup(attacker_name, attacker_team, defender_name, season):
     else:
         label = "Neutral"
 
-    # Reason keys off the attacker's most-used zone.
-    dom = max(ZONE_DEFENSE_SPEC, key=lambda z: profile.get(z, {}).get("share", 0.0))
-    dom_share = profile[dom]["share"] * 100
-    dom_pm = def_zones.get(dom, {}).get("plusminus", 0.0)
-    if dom_pm > 0.005:
+    # Reason keys off the *driving* zone: where the attacker takes a meaningful
+    # share AND the defender deviates most from average — i.e. the zone with the
+    # largest |share x plusminus|. This makes the reason vary by defender instead
+    # of always defaulting to the rim.
+    driver = max(contrib, key=lambda z: abs(contrib[z])) if contrib else \
+        max(ZONE_DEFENSE_SPEC, key=lambda z: profile.get(z, {}).get("share", 0.0))
+    driver_share = profile[driver]["share"] * 100
+    driver_pm = def_zones.get(driver, {}).get("plusminus", 0.0)
+    if driver_pm > 0.005:
         defender_quality = "below-average"
-    elif dom_pm < -0.005:
+    elif driver_pm < -0.005:
         defender_quality = "above-average"
     else:
         defender_quality = "about average"
@@ -510,7 +520,7 @@ def project_matchup(attacker_name, attacker_team, defender_name, season):
     result["label"] = label
     result["score"] = score
     result["reason"] = (
-        f"He takes {dom_share:.0f}% of shots {ZONE_LABELS[dom]}, where this "
+        f"He takes {driver_share:.0f}% of shots {ZONE_LABELS[driver]}, where this "
         f"defender is {defender_quality} — {label.lower()}."
     )
     return result
