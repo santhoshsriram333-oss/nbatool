@@ -203,8 +203,12 @@ def show_matchup_table(df, source_label=ACTUAL_BADGE):
     st.dataframe(view, use_container_width=True, hide_index=True)
 
 
-def show_projected_table(results, exclude_names=None):
+def show_projected_table(results, exclude_names=None, reason_key="reason"):
     """Render projected matchup dicts, each tagged with the Projected badge.
+
+    `reason_key` picks the wording: "reason" for the Attack tab (where "he" is my
+    attacker) or "reason_defend" for the Defend tab (where the row is a defender
+    and the scouted player is the shooter).
 
     Drops players with no usable defensive data (rather than listing them as
     Neutral / 0.00). If any were dropped, a small grey line notes the count."""
@@ -217,7 +221,7 @@ def show_projected_table(results, exclude_names=None):
         "Projection": r["label"],
         # guard against "-0.00" from tiny negative scores
         "Edge score": f"{(r['score'] if abs(r['score']) >= 0.005 else 0.0):.2f}",
-        "Why": r["reason"],
+        "Why": r.get(reason_key, r["reason"]),
     } for r in usable if not r.get("insufficient")]
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -379,7 +383,8 @@ with tab_defend:
                 st.caption("Projected matchups estimate the battle from each "
                            "player's season profile when they haven't directly "
                            "faced off. Treat as a guide, not a certainty.")
-                show_projected_table(projected, exclude_names=observed_names)
+                show_projected_table(projected, exclude_names=observed_names,
+                                     reason_key="reason_defend")
 
                 st.markdown("### League-wide (for context)")
                 st.caption("Everyone else who guarded him, toughest first.")

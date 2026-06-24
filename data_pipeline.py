@@ -56,6 +56,13 @@ ZONE_LABELS = {
     "short_mid": "in the short-mid range",
     "three": "from three",
 }
+# Defend-tab verdict: the label is from the ATTACKER's point of view (Favourable
+# = good for the shooter), so for the defending team we flip it into "us" terms.
+DEFEND_VERDICT = {
+    "Favourable": "hard for us to stop",
+    "Neutral": "an even matchup",
+    "Tough": "a matchup in our favour",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -466,16 +473,18 @@ def project_matchup(attacker_name, attacker_team, defender_name, season):
     defense = get_defender_zone_defense(season)
     def_zones = defense.get(defender_name)
 
-    result = {"defender": defender_name, "label": "Neutral",
-              "score": 0.0, "reason": "", "insufficient": False}
+    result = {"defender": defender_name, "label": "Neutral", "score": 0.0,
+              "reason": "", "reason_defend": "", "insufficient": False}
 
     if profile["total_shots"] == 0:
         result["insufficient"] = True
         result["reason"] = f"No shot data for {attacker_name} — can't project."
+        result["reason_defend"] = result["reason"]
         return result
     if not def_zones:
         result["insufficient"] = True
         result["reason"] = f"No defensive profile for {defender_name} this season."
+        result["reason_defend"] = result["reason"]
         return result
 
     # Weighted score = average of (zone plusminus) weighted by attacker shot share.
@@ -519,9 +528,18 @@ def project_matchup(attacker_name, attacker_team, defender_name, season):
 
     result["label"] = label
     result["score"] = score
+    # Attack-tab wording: "He" = my attacker, which reads correctly there.
     result["reason"] = (
         f"He takes {driver_share:.0f}% of shots {ZONE_LABELS[driver]}, where this "
         f"defender is {defender_quality} — {label.lower()}."
+    )
+    # Defend-tab wording: the row is the DEFENDER, so name the scouted attacker
+    # as the shooter explicitly — never let it read as if the defender shoots.
+    attacker_first = attacker_name.split()[0]
+    result["reason_defend"] = (
+        f"{attacker_first} takes {driver_share:.0f}% of his shots "
+        f"{ZONE_LABELS[driver]}, where {defender_name} is {defender_quality} — "
+        f"{DEFEND_VERDICT[label]}."
     )
     return result
 
