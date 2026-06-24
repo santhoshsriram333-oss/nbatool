@@ -10,6 +10,7 @@ warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Rectangle, Arc
+import pandas as pd
 import streamlit as st
 from nba_api.stats.static import teams
 
@@ -35,6 +36,19 @@ def cached_matchups(player_name, season):
 @st.cache_data(show_spinner=False)
 def cached_team_abbr(team_name):
     return dp.get_team_abbreviation(team_name)
+
+
+@st.cache_data(show_spinner="Projecting matchups…")
+def cached_best_defenders_projected(star_name, star_team, my_team, season):
+    return dp.best_defenders_projected(star_name, star_team, my_team, season)
+
+
+@st.cache_data(show_spinner="Projecting matchups…")
+def cached_projected_vs_roster(attacker_name, attacker_team, opp_team, season):
+    """Project my attacker against every player on the opponent's roster."""
+    roster = dp.get_roster(opp_team, season)["PLAYER"].tolist()
+    return [dp.project_matchup(attacker_name, attacker_team, d, season)
+            for d in roster]
 
 
 @st.cache_data(show_spinner="Pulling shot chart…")
@@ -162,35 +176,68 @@ COL_RENAME = {
 }
 
 
-def show_matchup_table(df):
-    """Render a matchup frame with friendly column names (or a note if empty)."""
+ACTUAL_BADGE = "✅ Actual matchup"
+PROJECTED_BADGE = "📊 Projected"
+
+
+def show_matchup_table(df, source_label=ACTUAL_BADGE):
+    """Render an observed-matchup frame with friendly column names and a Source
+    badge on every row (or a note if empty)."""
     if df.empty:
         st.caption("_No defenders in this group._")
         return
     view = df[DISPLAY_COLS].rename(columns=COL_RENAME)
+    view.insert(0, "Source", source_label)
     st.dataframe(view, use_container_width=True, hide_index=True)
 
 
-def lowest_make_area(make_by_area):
-    """From scouting_summary's make-% by area, return (label, pct) for the side
-    he shoots worst from — bucketed into left / right / the middle. Backcourt
-    heaves are ignored so they don't always 'win' as the coldest spot."""
-    buckets = {}
-    for zone, pct in make_by_area.items():
+def show_projected_table(results, exclude_names=None):
+    """Render projected matchup dicts, each tagged with the Projected badge."""
+    exclude = exclude_names or set()
+    rows = [{
+        "Source": PROJECTED_BADGE,
+        "Defender": r["defender"],
+        "Projection": r["label"],
+        "Edge score": r["score"],
+        "Why": r["reason"],
+    } for r in results if r["defender"] not in exclude]
+    if not rows:
+        st.caption("_No projected matchups to show._")
+        return
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def lowest_make_area_weighted(shots):
+    """Coldest side for the attacker, weighting make% by shot VOLUME.
+
+    Buckets SHOT_ZONE_AREA into left / right / down the middle and computes each
+    bucket's make% as total makes / total attempts (so a high-volume sub-zone
+    dominates its bucket, instead of a flat average of percentages). Backcourt
+    heaves are dropped. Returns (label, make_pct, attempts) or None."""
+    df = shots.copy()
+
+    def bucket(zone):
         if "Back Court" in zone:
-            continue
+            return None
         if "Left" in zone:
-            label = "left"
-        elif "Right" in zone:
-            label = "right"
-        else:
-            label = "down the middle"
-        buckets.setdefault(label, []).append(pct)
-    if not buckets:
+            return "left"
+        if "Right" in zone:
+            return "right"
+        return "down the middle"
+
+    df["_bucket"] = df["SHOT_ZONE_AREA"].map(bucket)
+    df = df[df["_bucket"].notna()]
+    if df.empty:
         return None
-    avg = {k: sum(v) / len(v) for k, v in buckets.items()}
-    label = min(avg, key=avg.get)
-    return label, round(avg[label], 1)
+
+    grp = df.groupby("_bucket")["SHOT_MADE_FLAG"].agg(makes="sum", attempts="count")
+    grp = grp[grp["attempts"] > 0]
+    if grp.empty:
+        return None
+    grp["make_pct"] = grp["makes"] / grp["attempts"] * 100
+    grp = grp.sort_values("make_pct")
+    coldest = grp.iloc[0]
+    return grp.index[0], round(float(coldest["make_pct"]), 1), int(coldest["attempts"])
 
 
 # -----------------------------------------------------------------------------
@@ -255,11 +302,11 @@ with tab_defend:
                         f"🛡️ Assign {best['DEF_PLAYER_NAME']} — held {star} to "
                         f"{best['PTS_PER_POSS']:.2f} pts per possession over "
                         f"{best['PARTIAL_POSS']:.0f} possessions.")
-                    area = lowest_make_area(summary["make_pct_by_area"])
+                    area = None if shots.empty else lowest_make_area_weighted(shots)
                     if area:
-                        label, pct = area
-                        st.info(f"Force him {label} — he shoots only {pct}% "
-                                "from there.")
+                        label, pct, attempts = area
+                        st.info(f"Force him {label} — he shoots only {pct}% there "
+                                f"(over {attempts} attempts).")
                 else:
                     st.warning(
                         f"No direct matchup data for your roster vs {star} this "
@@ -293,13 +340,30 @@ with tab_defend:
 
                 # --- Who to assign: my roster first, then league context ---
                 st.markdown(f"### From your roster ({my_team})")
-                st.caption("Toughest matchups first — these defenders held him to "
-                           "the fewest points per possession.")
-                show_matchup_table(roster_def)
+                st.caption(f"{ACTUAL_BADGE} = real possessions this season · "
+                           f"{PROJECTED_BADGE} = estimated from season profiles. "
+                           "Toughest matchups first.")
+                show_matchup_table(roster_def, source_label=ACTUAL_BADGE)
+
+                # Projected supplement — fills the gap for roster players who
+                # haven't logged enough head-to-head possessions vs this star.
+                observed_names = set(roster_def["DEF_PLAYER_NAME"])
+                try:
+                    projected = cached_best_defenders_projected(
+                        star, opponent, my_team, season)
+                except Exception as err:
+                    projected = []
+                    st.caption(f"_Projection unavailable: {err}_")
+                st.markdown(f"#### {PROJECTED_BADGE} matchups "
+                            "(roster players he hasn't faced enough)")
+                st.caption("Projected matchups estimate the battle from each "
+                           "player's season profile when they haven't directly "
+                           "faced off. Treat as a guide, not a certainty.")
+                show_projected_table(projected, exclude_names=observed_names)
 
                 st.markdown("### League-wide (for context)")
                 st.caption("Everyone else who guarded him, toughest first.")
-                show_matchup_table(league_def)
+                show_matchup_table(league_def, source_label=ACTUAL_BADGE)
 
 
 # -----------------------------------------------------------------------------
@@ -325,33 +389,50 @@ with tab_attack:
             except Exception as err:
                 st.error(f"Something went wrong pulling the data: {err}")
             else:
-                if matchups.empty:
-                    st.warning(f"No matchup data for {my_player} in {season}.")
+                # Best edges first; opponent's defenders split out from the rest.
+                # (Filtering/sorting works even if matchups is empty.)
+                vs_opp = matchups[matchups["TEAM"] == opp_abbr] \
+                    .sort_values("PTS_PER_POSS", ascending=False)
+                league = matchups[matchups["TEAM"] != opp_abbr] \
+                    .sort_values("PTS_PER_POSS", ascending=False)
+
+                if not vs_opp.empty:
+                    best = vs_opp.iloc[0]
+                    st.success(
+                        f"🎯 Attack {best['DEF_PLAYER_NAME']} — {my_player} "
+                        f"scored {best['PTS_PER_POSS']:.2f} points per "
+                        "possession against him.")
                 else:
-                    # Best edges first; opponent's defenders split out from the rest.
-                    vs_opp = matchups[matchups["TEAM"] == opp_abbr] \
-                        .sort_values("PTS_PER_POSS", ascending=False)
-                    league = matchups[matchups["TEAM"] != opp_abbr] \
-                        .sort_values("PTS_PER_POSS", ascending=False)
+                    st.warning(
+                        f"No prior matchup data vs {opponent} this season — "
+                        "see the projected edges below.")
 
-                    if not vs_opp.empty:
-                        best = vs_opp.iloc[0]
-                        st.success(
-                            f"🎯 Attack {best['DEF_PLAYER_NAME']} — {my_player} "
-                            f"scored {best['PTS_PER_POSS']:.2f} points per "
-                            "possession against him.")
-                    else:
-                        st.warning(
-                            f"No prior matchup data vs {opponent} this season — "
-                            f"see {my_player}'s league-wide edges below.")
+                # --- Observed matchups vs the opponent ---
+                st.markdown(f"### vs {opponent}'s defenders")
+                st.caption(f"{ACTUAL_BADGE} = real possessions this season · "
+                           f"{PROJECTED_BADGE} = estimated from season profiles. "
+                           "Best edges first.")
+                show_matchup_table(vs_opp, source_label=ACTUAL_BADGE)
 
-                    st.markdown(f"### vs {opponent}'s defenders")
-                    st.caption("Best edges first — highest points per possession.")
-                    show_matchup_table(vs_opp)
+                # --- Projected edges vs opponent defenders he hasn't faced enough ---
+                observed_names = set(vs_opp["DEF_PLAYER_NAME"])
+                try:
+                    proj = cached_projected_vs_roster(my_player, my_team,
+                                                      opponent, season)
+                except Exception as err:
+                    proj = []
+                    st.caption(f"_Projection unavailable: {err}_")
+                proj = sorted(proj, key=lambda r: r["score"], reverse=True)  # favourable first
+                st.markdown(f"#### {PROJECTED_BADGE} edges "
+                            f"(other {opponent} defenders)")
+                st.caption("Projected matchups estimate the battle from each "
+                           "player's season profile when they haven't directly "
+                           "faced off. Treat as a guide, not a certainty.")
+                show_projected_table(proj, exclude_names=observed_names)
 
-                    st.markdown("### League-wide (for context)")
-                    st.caption("Every other defender he faced, best edges first.")
-                    show_matchup_table(league)
+                st.markdown("### League-wide (for context)")
+                st.caption("Every other defender he faced, best edges first.")
+                show_matchup_table(league, source_label=ACTUAL_BADGE)
 
 
 # -----------------------------------------------------------------------------

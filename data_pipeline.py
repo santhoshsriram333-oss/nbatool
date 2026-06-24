@@ -14,6 +14,7 @@ from nba_api.stats.endpoints import (
     shotchartdetail,
     commonteamroster,
     leaguedashplayerstats,
+    leaguedashptdefend,
 )
 
 # only keep matchups with 40+ possessions — anything smaller gave really noisy,
@@ -26,6 +27,29 @@ TIMEOUT = 60
 # again — repeat runs (and the demo) just read the cached file.
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# --- Projection model (tune here) --------------------------------------------
+# When two players never directly faced off, I estimate the matchup by overlaying
+# where the attacker shoots against how well the defender holds shooters in those
+# same zones. The three zones map to LeagueDashPtDefend's defense categories.
+#
+# PLUSMINUS in that endpoint = defender's allowed FG% minus the shooter's normal
+# FG%. POSITIVE means the defender gives up MORE than usual -> good for the
+# attacker. So a higher weighted score = more favourable for the attacker.
+PROJ_FAVOURABLE_CUTOFF = 0.010   # weighted score >= this -> "Favourable"
+PROJ_TOUGH_CUTOFF = -0.010       # weighted score <= this -> "Tough"
+
+# zone key -> (LeagueDashPtDefend category, that category's allowed-FG% column)
+ZONE_DEFENSE_SPEC = {
+    "at_rim":    {"category": "Less Than 6Ft",  "dfg_col": "LT_06_PCT"},
+    "short_mid": {"category": "Less Than 10Ft", "dfg_col": "LT_10_PCT"},
+    "three":     {"category": "3 Pointers",     "dfg_col": "FG3_PCT"},
+}
+ZONE_LABELS = {
+    "at_rim": "at the rim",
+    "short_mid": "in the short-mid range",
+    "three": "from three",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +365,156 @@ def annotate_matchups_with_team(matchups_df, season):
     out = matchups_df.copy()
     out["TEAM"] = out["DEF_PLAYER_NAME"].map(lambda name: team_map.get(name, "—"))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Projection model — estimate a matchup when there's no head-to-head data
+# ---------------------------------------------------------------------------
+@functools.lru_cache(maxsize=None)
+def get_defender_zone_defense(season):
+    """How well each defender holds shooters, by zone.
+
+    Pulls LeagueDashPtDefend once per zone (cached to disk) and returns:
+        {player_name: {zone: {"d_fg_pct": float, "plusminus": float}}}
+    where plusminus < 0 means the defender holds shooters BELOW their normal
+    clip (a good defender). lru_cache keeps the assembled dict around so the
+    per-roster projection loop doesn't rebuild it for every player.
+    """
+    by_player = {}
+    for zone, spec in ZONE_DEFENSE_SPEC.items():
+        category = spec["category"]
+        dfg_col = spec["dfg_col"]
+
+        def fetch(category=category):
+            d = leaguedashptdefend.LeagueDashPtDefend(
+                season=season,
+                defense_category=category,
+                per_mode_simple="Totals",
+                timeout=TIMEOUT,
+            )
+            return d.get_data_frames()[0]
+
+        df = cached_pull(f"ptdefend_{category.replace(' ', '_')}_{season}", fetch)
+        if df.empty:
+            continue
+        # One row per defender — if a name somehow repeats, keep his busiest row.
+        df = df.sort_values("GP", ascending=False).drop_duplicates("PLAYER_NAME")
+        for _, row in df.iterrows():
+            rec = by_player.setdefault(row["PLAYER_NAME"], {})
+            rec[zone] = {
+                "d_fg_pct": float(row[dfg_col]),
+                "plusminus": float(row["PLUSMINUS"]),
+            }
+    return by_player
+
+
+@functools.lru_cache(maxsize=None)
+def get_attacker_zone_profile(player_name, team_name, season):
+    """Where the attacker scores, in the same three zones.
+
+    From his shot chart, the share of shots and make% in each of at-rim
+    (<6 ft), short-mid (other 2s), and three. Returns:
+        {zone: {"share": 0..1, "make_pct": 0..100}, "total_shots": int}
+    """
+    shots = get_shots(player_name, team_name, season)
+    total = len(shots)
+
+    profile = {}
+    if total == 0:
+        for zone in ZONE_DEFENSE_SPEC:
+            profile[zone] = {"share": 0.0, "make_pct": 0.0}
+        profile["total_shots"] = 0
+        return profile
+
+    is_three = shots["SHOT_TYPE"] == "3PT Field Goal"
+    masks = {
+        "at_rim": (~is_three) & (shots["SHOT_DISTANCE"] < 6),
+        "short_mid": (~is_three) & (shots["SHOT_DISTANCE"] >= 6),
+        "three": is_three,
+    }
+    for zone, mask in masks.items():
+        zone_shots = shots[mask]
+        n = len(zone_shots)
+        make = float(zone_shots["SHOT_MADE_FLAG"].mean()) if n else 0.0
+        profile[zone] = {"share": round(n / total, 3),
+                         "make_pct": round(make * 100, 1)}
+    profile["total_shots"] = total
+    return profile
+
+
+def project_matchup(attacker_name, attacker_team, defender_name, season):
+    """Estimate how a matchup would go from each player's season profile.
+
+    Overlays the attacker's zone shot-share against the defender's zone defense
+    (weighting each zone by how often the attacker shoots there). Returns a dict
+    with a label ("Favourable"/"Neutral"/"Tough"), the weighted score, and a
+    one-line plain-English reason.
+    """
+    profile = get_attacker_zone_profile(attacker_name, attacker_team, season)
+    defense = get_defender_zone_defense(season)
+    def_zones = defense.get(defender_name)
+
+    result = {"defender": defender_name, "label": "Neutral",
+              "score": 0.0, "reason": ""}
+
+    if profile["total_shots"] == 0:
+        result["reason"] = f"No shot data for {attacker_name} — can't project."
+        return result
+    if not def_zones:
+        result["reason"] = f"No defensive profile for {defender_name} this season."
+        return result
+
+    # Weighted score = average of (zone plusminus) weighted by attacker shot share.
+    score, weight = 0.0, 0.0
+    for zone in ZONE_DEFENSE_SPEC:
+        share = profile.get(zone, {}).get("share", 0.0)
+        zd = def_zones.get(zone)
+        if zd is None or share == 0:
+            continue
+        score += share * zd["plusminus"]
+        weight += share
+    if weight > 0:
+        score /= weight       # normalise so zones we lack defense data for don't dilute
+    score = round(score, 4)
+
+    if score >= PROJ_FAVOURABLE_CUTOFF:
+        label = "Favourable"
+    elif score <= PROJ_TOUGH_CUTOFF:
+        label = "Tough"
+    else:
+        label = "Neutral"
+
+    # Reason keys off the attacker's most-used zone.
+    dom = max(ZONE_DEFENSE_SPEC, key=lambda z: profile.get(z, {}).get("share", 0.0))
+    dom_share = profile[dom]["share"] * 100
+    dom_pm = def_zones.get(dom, {}).get("plusminus", 0.0)
+    if dom_pm > 0.005:
+        defender_quality = "below-average"
+    elif dom_pm < -0.005:
+        defender_quality = "above-average"
+    else:
+        defender_quality = "about average"
+
+    result["label"] = label
+    result["score"] = score
+    result["reason"] = (
+        f"He takes {dom_share:.0f}% of shots {ZONE_LABELS[dom]}, where this "
+        f"defender is {defender_quality} — {label.lower()}."
+    )
+    return result
+
+
+def best_defenders_projected(star_name, star_team, my_team, season):
+    """Projected version of 'who on my roster can guard him'.
+
+    Runs project_matchup for every player on My Team (star = attacker, my player
+    = defender) and returns them sorted toughest-first (lowest score = the
+    defender who'd give the attacker the least)."""
+    roster = get_roster(my_team, season)["PLAYER"].tolist()
+    results = [project_matchup(star_name, star_team, defender, season)
+               for defender in roster]
+    results.sort(key=lambda r: r["score"])   # toughest matchup for attacker first
+    return results
 
 
 # ---------------------------------------------------------------------------
