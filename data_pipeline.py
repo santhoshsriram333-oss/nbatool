@@ -39,11 +39,17 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 PROJ_FAVOURABLE_CUTOFF = 0.010   # weighted score >= this -> "Favourable"
 PROJ_TOUGH_CUTOFF = -0.010       # weighted score <= this -> "Tough"
 
-# zone key -> (LeagueDashPtDefend category, that category's allowed-FG% column)
+# Sample-size floor: a defender needs to have defended at least this many shots
+# in a zone for that zone's number to be trustworthy. Below it, a single hot/cold
+# game swings the plus-minus wildly (a deep reserve who defended 6 shots can post
+# a -0.40 that's pure noise), so we drop the zone instead of letting it through.
+MIN_DEFENDED_FGA = 50
+
+# zone key -> (LeagueDashPtDefend category, allowed-FG% column, attempts column)
 ZONE_DEFENSE_SPEC = {
-    "at_rim":    {"category": "Less Than 6Ft",  "dfg_col": "LT_06_PCT"},
-    "short_mid": {"category": "Less Than 10Ft", "dfg_col": "LT_10_PCT"},
-    "three":     {"category": "3 Pointers",     "dfg_col": "FG3_PCT"},
+    "at_rim":    {"category": "Less Than 6Ft",  "dfg_col": "LT_06_PCT", "fga_col": "FGA_LT_06"},
+    "short_mid": {"category": "Less Than 10Ft", "dfg_col": "LT_10_PCT", "fga_col": "FGA_LT_10"},
+    "three":     {"category": "3 Pointers",     "dfg_col": "FG3_PCT",   "fga_col": "FG3A"},
 }
 ZONE_LABELS = {
     "at_rim": "at the rim",
@@ -384,6 +390,7 @@ def get_defender_zone_defense(season):
     for zone, spec in ZONE_DEFENSE_SPEC.items():
         category = spec["category"]
         dfg_col = spec["dfg_col"]
+        fga_col = spec["fga_col"]
 
         def fetch(category=category):
             d = leaguedashptdefend.LeagueDashPtDefend(
@@ -400,6 +407,11 @@ def get_defender_zone_defense(season):
         # One row per defender — if a name somehow repeats, keep his busiest row.
         df = df.sort_values("GP", ascending=False).drop_duplicates("PLAYER_NAME")
         for _, row in df.iterrows():
+            # Sample-size floor: skip this zone if the defender hasn't faced
+            # enough shots there. With too few attempts the plus-minus is noise,
+            # so we treat it as "not enough data" rather than trusting it.
+            if float(row[fga_col]) < MIN_DEFENDED_FGA:
+                continue
             rec = by_player.setdefault(row["PLAYER_NAME"], {})
             rec[zone] = {
                 "d_fg_pct": float(row[dfg_col]),
