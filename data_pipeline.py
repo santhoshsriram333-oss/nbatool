@@ -15,6 +15,8 @@ from nba_api.stats.endpoints import (
     commonteamroster,
     leaguedashplayerstats,
     leaguedashptdefend,
+    leaguedashteamstats,
+    leaguedashplayerclutch,
 )
 
 # only keep matchups with 40+ possessions — anything smaller gave really noisy,
@@ -274,6 +276,31 @@ def scouting_summary(player_name, team_name, season):
     }
 
 
+def get_league_shot_averages(player_name, team_name, season):
+    """League-average shooting by court zone for the season — the baseline for
+    the hot/cold chart. Comes from ShotChartDetail's second frame (the same
+    call shape as get_shots), which returns FG% per zone across the whole league.
+
+    Cached by season (the league averages are identical for any player query),
+    so it's fetched once per season then read from disk.
+    """
+    player_id = get_player_id(player_name)
+    team_id = get_team_id(team_name)
+
+    def fetch():
+        sc = shotchartdetail.ShotChartDetail(
+            team_id=team_id,
+            player_id=player_id,
+            season_nullable=season,
+            season_type_all_star="Regular Season",
+            context_measure_simple="FGA",
+            timeout=TIMEOUT,
+        )
+        return sc.get_data_frames()[1]
+
+    return cached_pull(f"leagueavg_{season}", fetch)
+
+
 # ---------------------------------------------------------------------------
 # Roster + top scorer
 # ---------------------------------------------------------------------------
@@ -302,7 +329,7 @@ def get_team_player_scoring(team_name, season):
     """Per-game player stats for everyone who logged minutes for this team.
 
     I pull this separately from the roster because it's where the points-per-game
-    (PTS, in PerGame mode) lives — that's what I use to find the top scorer.
+    (PTS, in PerGame mode) lives, that's what I use to find the top scorer.
     """
     team_id = get_team_id(team_name)
 
@@ -329,6 +356,295 @@ def get_top_scorer(team_name, season):
         return None
     top = df.sort_values("PTS", ascending=False).iloc[0]
     return top["PLAYER_NAME"]
+
+
+# ---------------------------------------------------------------------------
+# Player card data — photo, headline stats, season efficiency
+# ---------------------------------------------------------------------------
+def get_player_photo_url(player_name):
+    """NBA CDN headshot URL (1040x760 png) for a player, via their player id."""
+    pid = get_player_id(player_name)
+    return f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
+
+
+def get_player_headline_stats(player_name, team_name, season):
+    """Per-game PTS/REB/AST plus position for a player.
+
+    PTS/REB/AST come from LeagueDashPlayerStats (PerGame, team-filtered, via the
+    cached get_team_player_scoring); position comes from the cached roster pull.
+    Anything we can't find comes back as None / '' rather than raising, so a
+    missing stat never breaks the card.
+    """
+    out = {"player": player_name, "team": team_name, "position": "",
+           "ppg": None, "rpg": None, "apg": None}
+
+    def _match(df, col):
+        row = df[df[col] == player_name]
+        if row.empty:
+            row = df[df[col].str.lower() == player_name.lower()]
+        return row
+
+    try:
+        stats = get_team_player_scoring(team_name, season)
+        row = _match(stats, "PLAYER_NAME")
+        if not row.empty:
+            r = row.iloc[0]
+            out["ppg"] = round(float(r["PTS"]), 1)
+            out["rpg"] = round(float(r["REB"]), 1)
+            out["apg"] = round(float(r["AST"]), 1)
+    except Exception:
+        pass
+
+    try:
+        roster = get_roster(team_name, season)
+        rr = _match(roster, "PLAYER")
+        if not rr.empty:
+            out["position"] = str(rr.iloc[0]["POSITION"])
+    except Exception:
+        pass
+
+    return out
+
+
+def get_player_avg_matchup_pts_per_poss(player_name, season):
+    """The player's overall season points-per-possession across all his
+    matchups (total points / total partial possessions). This is the baseline
+    a single matchup gets compared against. Returns None if there's no data."""
+    df = get_matchups(player_name, season)
+    if df.empty:
+        return None
+    total_poss = float(df["PARTIAL_POSS"].sum())
+    if total_poss <= 0:
+        return None
+    return round(float(df["PLAYER_PTS"].sum()) / total_poss, 2)
+
+
+# Advanced metrics we surface on the cards: dict key -> (value col, rank col).
+_ADV_FIELDS = {
+    "off_rating": ("OFF_RATING", "OFF_RATING_RANK"),
+    "def_rating": ("DEF_RATING", "DEF_RATING_RANK"),
+    "net_rating": ("NET_RATING", "NET_RATING_RANK"),
+    "ts_pct":     ("TS_PCT", "TS_PCT_RANK"),
+    "efg_pct":    ("EFG_PCT", "EFG_PCT_RANK"),
+    "usg_pct":    ("USG_PCT", "USG_PCT_RANK"),
+    "reb_pct":    ("REB_PCT", "REB_PCT_RANK"),
+    "ast_pct":    ("AST_PCT", "AST_PCT_RANK"),
+}
+
+
+def _league_advanced_stats(season):
+    """Whole-league Advanced player stats (so the *_RANK columns are league-wide,
+    not filtered to one team). Cached to disk."""
+    def fetch():
+        s = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=season,
+            measure_type_detailed_defense="Advanced",
+            per_mode_detailed="PerGame",
+            timeout=TIMEOUT,
+        )
+        return s.get_data_frames()[0]
+
+    return cached_pull(f"advstats_{season}", fetch)
+
+
+def get_advanced_player_stats(player_name, team_name, season):
+    """Advanced metrics + league ranks for a player.
+
+    Returns a dict: each of off_rating/def_rating/net_rating/ts_pct/efg_pct/
+    usg_pct maps to {"value": float|None, "rank": int|None}, plus
+    "total_players" (the size of the ranked pool). Every column is checked to
+    exist before it's read, and anything missing comes back as None — a missing
+    stat never raises.
+    """
+    out = {key: {"value": None, "rank": None} for key in _ADV_FIELDS}
+    out["total_players"] = None
+
+    try:
+        df = _league_advanced_stats(season)
+    except Exception:
+        return out
+    if df is None or df.empty or "PLAYER_NAME" not in df.columns:
+        return out
+
+    out["total_players"] = int(len(df))
+
+    row = df[df["PLAYER_NAME"] == player_name]
+    if row.empty:
+        row = df[df["PLAYER_NAME"].str.lower() == player_name.lower()]
+    if len(row) > 1:
+        # Disambiguate a duplicate name by team when we can.
+        try:
+            abbr = get_team_abbreviation(team_name)
+            narrowed = row[row["TEAM_ABBREVIATION"] == abbr]
+            if not narrowed.empty:
+                row = narrowed
+        except Exception:
+            pass
+    if row.empty:
+        return out
+
+    r = row.iloc[0]
+    for key, (vcol, rcol) in _ADV_FIELDS.items():
+        if vcol in df.columns:
+            try:
+                out[key]["value"] = float(r[vcol])
+            except (TypeError, ValueError):
+                pass
+        if rcol in df.columns:
+            try:
+                out[key]["rank"] = int(r[rcol])
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Four Factors (team-level) — the four things that swing games
+# ---------------------------------------------------------------------------
+def _league_four_factors(season):
+    def fetch():
+        s = leaguedashteamstats.LeagueDashTeamStats(
+            season=season,
+            measure_type_detailed_defense="Four Factors",
+            per_mode_detailed="PerGame",
+            timeout=TIMEOUT,
+        )
+        return s.get_data_frames()[0]
+
+    return cached_pull(f"fourfactors_{season}", fetch)
+
+
+def _league_team_advanced(season):
+    def fetch():
+        s = leaguedashteamstats.LeagueDashTeamStats(
+            season=season,
+            measure_type_detailed_defense="Advanced",
+            per_mode_detailed="PerGame",
+            timeout=TIMEOUT,
+        )
+        return s.get_data_frames()[0]
+
+    return cached_pull(f"teamadv_{season}", fetch)
+
+
+def get_four_factors(team_name, season):
+    """A team's four factors: EFG_PCT, FTA_RATE, TM_TOV_PCT, OREB_PCT.
+
+    Pulls LeagueDashTeamStats with the Four Factors measure type. If that call
+    errors, falls back to the Advanced team table (which carries efg/tov/oreb);
+    fta_rate may stay None in that fallback. Missing values come back as None.
+    """
+    out = {"efg_pct": None, "fta_rate": None,
+           "tm_tov_pct": None, "oreb_pct": None}
+    try:
+        team_id = get_team_id(team_name)
+    except Exception:
+        return out
+
+    fields = [("efg_pct", "EFG_PCT"), ("fta_rate", "FTA_RATE"),
+              ("tm_tov_pct", "TM_TOV_PCT"), ("oreb_pct", "OREB_PCT")]
+    try:
+        df = _league_four_factors(season)
+        row = df[df["TEAM_ID"] == team_id]
+        if not row.empty:
+            r = row.iloc[0]
+            for key, col in fields:
+                if col in df.columns:
+                    try:
+                        out[key] = float(r[col])
+                    except (TypeError, ValueError):
+                        pass
+            return out
+    except Exception:
+        pass
+
+    # Fallback: the Advanced team table carries efg / tov / oreb (no fta_rate).
+    try:
+        adv = _league_team_advanced(season)
+        row = adv[adv["TEAM_ID"] == team_id]
+        if not row.empty:
+            r = row.iloc[0]
+            for key, col in [("efg_pct", "EFG_PCT"), ("tm_tov_pct", "TM_TOV_PCT"),
+                             ("oreb_pct", "OREB_PCT")]:
+                if col in adv.columns:
+                    try:
+                        out[key] = float(r[col])
+                    except (TypeError, ValueError):
+                        pass
+    except Exception:
+        pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Clutch stats — who a team feeds in the last 5 minutes of a close game
+# ---------------------------------------------------------------------------
+# "Clutch" here = last 5 minutes of the 4th/OT with the score within 5 points,
+# which is the NBA's standard clutch definition.
+def _league_clutch(season, measure):
+    def fetch():
+        c = leaguedashplayerclutch.LeagueDashPlayerClutch(
+            season=season,
+            clutch_time="Last 5 Minutes",
+            ahead_behind="Ahead or Behind",
+            point_diff=5,
+            measure_type_detailed_defense=measure,
+            per_mode_detailed="PerGame",
+            timeout=TIMEOUT,
+        )
+        return c.get_data_frames()[0]
+
+    return cached_pull(f"clutch_{measure}_{season}", fetch)
+
+
+def get_clutch_stats(team_name, season, top_n=5):
+    """A team's key clutch players (last 5 min, margin <= 5), sorted by clutch
+    points per game. Each entry: player, clutch GP, PTS/game, FG%, and usage
+    (usage from the Advanced clutch table; None if unavailable). Returns []
+    on any failure so the tab degrades gracefully.
+    """
+    out = []
+    try:
+        team_id = get_team_id(team_name)
+    except Exception:
+        return out
+    try:
+        base = _league_clutch(season, "Base")
+    except Exception:
+        return out
+
+    base = base[base["TEAM_ID"] == team_id]
+    if base.empty:
+        return out
+    # Drop one-off appearances so a single hot game doesn't top the list.
+    if "GP" in base.columns and (base["GP"] >= 2).any():
+        base = base[base["GP"] >= 2]
+
+    # Usage comes from the Advanced clutch table (best-effort).
+    usg_map = {}
+    try:
+        adv = _league_clutch(season, "Advanced")
+        adv = adv[adv["TEAM_ID"] == team_id]
+        if "USG_PCT" in adv.columns:
+            usg_map = dict(zip(adv["PLAYER_ID"], adv["USG_PCT"]))
+    except Exception:
+        pass
+
+    # Rank by total clutch scoring (games x points/game) so "who they feed late"
+    # reflects volume + frequency, not a 2-game hot streak.
+    base = base.copy()
+    base["_total"] = base["PTS"] * base["GP"]
+    base = base.sort_values("_total", ascending=False).head(top_n)
+    for _, r in base.iterrows():
+        usg = usg_map.get(r["PLAYER_ID"])
+        out.append({
+            "player": r["PLAYER_NAME"],
+            "gp": int(r["GP"]) if "GP" in base.columns else None,
+            "pts": float(r["PTS"]) if "PTS" in base.columns else None,
+            "fg_pct": float(r["FG_PCT"]) if "FG_PCT" in base.columns else None,
+            "usg": float(usg) if usg is not None else None,
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------

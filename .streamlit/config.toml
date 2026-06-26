@@ -1,0 +1,13 @@
+[theme]
+# Clean, professional dark theme — dark-grey surfaces, off-white text, one
+# restrained muted-blue accent. Deliberately not pure black/white or bright
+# primary colours.
+base = "dark"
+primaryColor = "#5f86b3"
+backgroundColor = "#15171a"
+secondaryBackgroundColor = "#1e2125"
+textColor = "#e3e5e8"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
