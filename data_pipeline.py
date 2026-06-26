@@ -346,14 +346,28 @@ def get_team_player_scoring(team_name, season):
 
 
 def get_top_scorer(team_name, season):
-    """Name of the team's highest points-per-game player that season.
+    """Name of the team's highest points-per-game player *on the current roster*.
 
     Used to pre-select a sensible default in the dropdowns. Returns None if the
     scoring table comes back empty (e.g. a season with no data yet).
+
+    Important: the LeagueDashPlayerStats team filter still includes players who
+    were traded away mid-season (they logged games for this team), so a departed
+    star like a mid-year trade can outscore everyone still here. We intersect
+    with the current CommonTeamRoster so the "top scorer" is someone actually on
+    the team now — this also keeps the Game Plan tab and the Defend dropdown in
+    agreement, since the dropdown lists that same roster.
     """
     df = get_team_player_scoring(team_name, season)
     if df.empty:
         return None
+    try:
+        roster_ids = set(get_roster(team_name, season)["PLAYER_ID"])
+        on_roster = df[df["PLAYER_ID"].isin(roster_ids)]
+        if not on_roster.empty:
+            df = on_roster
+    except Exception:
+        pass
     top = df.sort_values("PTS", ascending=False).iloc[0]
     return top["PLAYER_NAME"]
 
