@@ -118,6 +118,11 @@ def cached_clutch_stats(team_name, season):
     return dp.get_clutch_stats(team_name, season)
 
 
+@st.cache_data(show_spinner="Finding the matchup to hunt…")
+def cached_attack_mismatch(my_team, opponent, season):
+    return dp.find_attack_mismatch(my_team, opponent, season)
+
+
 def _default_index(names, target):
     """Index of `target` in `names`, tolerant of case/accent-ish mismatches;
     falls back to 0 so a dropdown always has a valid default."""
@@ -650,9 +655,17 @@ def attack_takeaway(my_player, my_team, opponent, season):
             # edge. Don't say "attack"; surface a projected edge if there is one.
             observed = set(vs_opp["DEF_PLAYER_NAME"])
             p = _top_projected_edge(my_player, my_team, opponent, season, observed)
-            head = (f"No proven edge vs {opponent} — {my_player} is below his "
-                    f"{avg:.2f} average against everyone he's faced "
-                    f"(best: {best['DEF_PLAYER_NAME']}, {ppp:.2f}).")
+            n = len(vs_opp)
+            # Be honest about sample size — "everyone he's faced" overstates it
+            # when it's really just one or two defenders.
+            if n == 1:
+                head = (f"No proven edge vs {opponent} — {my_player}'s only "
+                        f"matchup there ({best['DEF_PLAYER_NAME']}) held him to "
+                        f"{ppp:.2f}, below his {avg:.2f} average.")
+            else:
+                head = (f"No proven edge vs {opponent} — {my_player} is below his "
+                        f"{avg:.2f} average against all {n} of their defenders "
+                        f"he's faced (best: {best['DEF_PLAYER_NAME']}, {ppp:.2f}).")
             if p and p["score"] > 0:
                 out["kind"] = "projected"
                 out["sentence"] = (f"{head} Projected best edge: {p['defender']} "
@@ -714,13 +727,22 @@ def _adv_chip(label, value_str, rank, total):
 
 
 def game_plan_bullets(my_team, opponent, my_star, opp_star, season,
-                      defend_tk, attack_tk):
+                      defend_tk, mismatch):
     """Coach's-notes summary: 4–6 plain-English bullets templated purely from
     values we've already pulled (takeaways + advanced stats). Each piece is
     guarded so a missing stat just drops its bullet."""
     bullets = []
-    if attack_tk and attack_tk.get("sentence"):
-        bullets.append(attack_tk["sentence"])
+    # 1. Offence — hunt the best matchup (not just feature our top scorer).
+    if mismatch and mismatch["kind"] == "observed":
+        bullets.append(
+            f"Hunt {mismatch['defender']} with {mismatch['attacker']} — "
+            f"{mismatch['ppp']:.2f} pts/poss on him, above his "
+            f"{mismatch['attacker_avg']:.2f} average.")
+    elif mismatch:
+        bullets.append(
+            f"Hunt {mismatch['defender']} with {mismatch['attacker']} — "
+            f"projected {mismatch['label']} matchup.")
+    # 2 + 3. Defence — assign the best defender, force him to his weak side.
     if defend_tk and defend_tk.get("sentence"):
         bullets.append(defend_tk["sentence"])
     if defend_tk and defend_tk.get("force"):
@@ -1006,22 +1028,23 @@ with tab_overview:
         my_star = None
 
     # Compute the takeaways once, up front — reused by the summary and the cards.
+    # Defence centres on THEIR star; offence hunts the best MATCHUP (not just our
+    # top scorer), so we find the strongest mismatch across our whole roster.
     try:
         defend_tk = defend_takeaway(opp_star, opponent, my_team, season) \
             if opp_star else None
     except Exception:
         defend_tk = None
     try:
-        attack_tk = attack_takeaway(my_star, my_team, opponent, season) \
-            if my_star else None
+        mismatch = cached_attack_mismatch(my_team, opponent, season)
     except Exception:
-        attack_tk = None
+        mismatch = None
 
     # --- Game plan at a glance (auto-summary) ---
     if opp_star and my_star:
         try:
             bullets = game_plan_bullets(my_team, opponent, my_star, opp_star,
-                                        season, defend_tk, attack_tk)
+                                        season, defend_tk, mismatch)
             render_game_plan_summary(bullets)
         except Exception:
             pass
@@ -1045,15 +1068,38 @@ with tab_overview:
             st.info(f"Couldn't load {opponent}'s top scorer.")
 
     with col_att:
-        st.markdown("#### Attack with our star")
-        if my_star:
-            # Card shows OUR attacker (my-team top scorer).
+        st.markdown("#### Attack their weak link")
+        if mismatch:
+            # Feature OUR hunter (the player with the real edge), and name the
+            # weak-link defender to attack in the plan text.
+            render_player_card(mismatch["attacker"], my_team, season)
+            if mismatch["kind"] == "observed":
+                sentence = (
+                    f"Hunt {mismatch['defender']} with {mismatch['attacker']} — "
+                    f"{mismatch['ppp']:.2f} pts/poss on him (+{mismatch['edge']:.2f} "
+                    f"above his {mismatch['attacker_avg']:.2f} average) over "
+                    f"{mismatch['poss']:.0f} possessions. Get him switched onto "
+                    f"{mismatch['defender']}.")
+            else:
+                sentence = (
+                    f"Hunt {mismatch['defender']} with {mismatch['attacker']} — "
+                    f"projected {mismatch['label']} matchup. Get him switched onto "
+                    f"{mismatch['defender']}.")
+            render_plan("ATTACK PLAN", sentence, accent="attack")
+            if my_star and my_star != mismatch["attacker"]:
+                st.caption(f"Engine: {my_star} still runs the offence — keep "
+                           "feeding him too.")
+            st.caption("→ See the Attack tab for the full breakdown.")
+        elif my_star:
+            # No clear seam in the opponent's rotation — attack through our engine.
             render_player_card(my_star, my_team, season)
-            if attack_tk:
-                render_plan("ATTACK PLAN", attack_tk["sentence"], accent="attack")
+            render_plan("ATTACK PLAN",
+                        f"No clear matchup edge vs {opponent} — attack through "
+                        f"{my_star} (our engine) and take what the defence gives.",
+                        accent="attack")
             st.caption("→ See the Attack tab for the full breakdown.")
         else:
-            st.info(f"Couldn't load {my_team}'s top scorer.")
+            st.info(f"Couldn't load {my_team}'s roster.")
 
     # --- Four Factors team comparison ---
     st.markdown(f"#### Four Factors — {my_team} vs {opponent}")

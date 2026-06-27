@@ -888,6 +888,95 @@ def best_defenders_projected(star_name, star_team, my_team, season):
 
 
 # ---------------------------------------------------------------------------
+# Offensive matchup hunting — who to attack (their weak link) and with whom
+# ---------------------------------------------------------------------------
+ROTATION_MIN_MPG = 15.0   # only hunt defenders who actually play rotation minutes
+
+
+def _rotation_players(team_name, season, min_mpg=ROTATION_MIN_MPG):
+    """Current-roster players who log at least `min_mpg` minutes per game — the
+    ones actually worth game-planning around (you can't hunt a benchwarmer)."""
+    df = get_team_player_scoring(team_name, season)
+    if df.empty or "MIN" not in df.columns or "PLAYER_NAME" not in df.columns:
+        return set()
+    try:
+        roster_ids = set(get_roster(team_name, season)["PLAYER_ID"])
+        df = df[df["PLAYER_ID"].isin(roster_ids)]
+    except Exception:
+        pass
+    return set(df[df["MIN"] >= min_mpg]["PLAYER_NAME"])
+
+
+def find_attack_mismatch(my_team, opponent, season):
+    """The best offensive matchup to hunt: which of our players has the biggest
+    scoring edge against which of the opponent's rotation defenders.
+
+    Offense is about hunting mismatches, not featuring your top scorer — so this
+    scans our whole roster against the opponent's rotation defenders and returns
+    the strongest edge as {attacker, defender, kind, ...}, or None.
+
+    Guardrails: the defender must be an opponent rotation player (>= ROTATION_MIN_MPG)
+    so we don't scheme to attack someone who barely plays, and observed matchups
+    already carry get_matchups' 40-possession floor. A real observed edge (our
+    player scores above his own season average on that defender) is preferred;
+    otherwise it falls back to the projection model.
+    """
+    try:
+        opp_abbr = get_team_abbreviation(opponent)
+    except Exception:
+        return None
+    opp_rotation = _rotation_players(opponent, season)
+    if not opp_rotation:
+        return None
+    try:
+        my_roster = get_roster(my_team, season)["PLAYER"].tolist()
+    except Exception:
+        return None
+
+    # 1) Observed: real edges across our roster vs opponent rotation defenders.
+    best = None
+    for attacker in my_roster:
+        try:
+            mu = annotate_matchups_with_team(get_matchups(attacker, season), season)
+        except Exception:
+            continue
+        avg = get_player_avg_matchup_pts_per_poss(attacker, season)
+        if avg is None:
+            continue
+        vs = mu[(mu["TEAM"] == opp_abbr)
+                & (mu["DEF_PLAYER_NAME"].isin(opp_rotation))]
+        for _, r in vs.iterrows():
+            ppp = float(r["PTS_PER_POSS"])
+            edge = ppp - avg
+            if edge <= 0:
+                continue                      # not a genuine edge for this player
+            cand = {"attacker": attacker, "defender": r["DEF_PLAYER_NAME"],
+                    "kind": "observed", "ppp": round(ppp, 2),
+                    "attacker_avg": round(avg, 2), "edge": round(edge, 2),
+                    "poss": round(float(r["PARTIAL_POSS"]), 1)}
+            if best is None or cand["edge"] > best["edge"]:
+                best = cand
+    if best is not None:
+        return best
+
+    # 2) Fallback: projection model — best favourable (attacker, defender) pair.
+    best_proj = None
+    for attacker in my_roster:
+        for defender in opp_rotation:
+            try:
+                res = project_matchup(attacker, my_team, defender, season)
+            except Exception:
+                continue
+            if res.get("insufficient") or res["score"] <= 0:
+                continue
+            if best_proj is None or res["score"] > best_proj["score"]:
+                best_proj = {"attacker": attacker, "defender": defender,
+                             "kind": "projected", "score": res["score"],
+                             "label": res["label"]}
+    return best_proj
+
+
+# ---------------------------------------------------------------------------
 # Quick manual test — run this file directly to check all four functions work.
 # I use Jokić because his data is rich enough to eyeball whether the numbers
 # look sane.
