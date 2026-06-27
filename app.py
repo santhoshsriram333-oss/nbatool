@@ -488,6 +488,9 @@ def show_projected_table(results, exclude_names=None, reason_key="reason"):
                 f"{score:.2f}", r.get(reason_key, r["reason"]),
             ])
         _html_table(["Source", "Defender", "Projection", "Edge score", "Why"], rows)
+        st.caption("Edge score = weighted FG% edge, roughly −0.10 to +0.10 "
+                   "(positive favours the scorer). Within ±0.01 is Neutral; "
+                   "±0.03 a modest edge, ±0.08+ a strong one.")
     else:
         st.caption("No projected matchups to show.")
     if excluded:
@@ -598,9 +601,30 @@ def defend_takeaway(star, opponent, my_team, season):
     return out
 
 
+def _top_projected_edge(my_player, my_team, opponent, season, exclude=None):
+    """Highest-scoring projected edge vs the opponent (best for my player), or
+    None. The score may be <= 0 if no favourable matchup exists — the caller
+    decides whether it's good enough to recommend."""
+    exclude = exclude or set()
+    try:
+        proj = [r for r in cached_projected_vs_roster(my_player, my_team, opponent,
+                                                      season)
+                if not r.get("insufficient") and r["defender"] not in exclude]
+    except Exception:
+        return None
+    proj.sort(key=lambda r: r["score"], reverse=True)
+    return proj[0] if proj else None
+
+
 def attack_takeaway(my_player, my_team, opponent, season):
     """Attack takeaway used by the Attack tab and Overview. Returns
-    {sentence, kind}; kind in {observed, projected, none}."""
+    {sentence, kind}; kind in {observed, projected, none}.
+
+    Only recommends "Attack X" when there's a genuine edge — i.e. my player
+    scores at or above his own season average against that defender. If the best
+    matchup he's actually faced is BELOW his average, the defender is doing a
+    good job, so recommending an attack there would be backwards; instead we say
+    so plainly and point to the best projected edge."""
     out = {"sentence": None, "kind": "none"}
     try:
         matchups = cached_matchups(my_player, season)
@@ -611,25 +635,43 @@ def attack_takeaway(my_player, my_team, opponent, season):
 
     vs_opp = matchups[matchups["TEAM"] == opp_abbr] \
         .sort_values("PTS_PER_POSS", ascending=False)
+
     if not vs_opp.empty:
         best = vs_opp.iloc[0]
         ppp = best["PTS_PER_POSS"]
-        out["kind"] = "observed"
-        out["sentence"] = (
-            f"Attack {best['DEF_PLAYER_NAME']} — {my_player} scored {ppp:.2f} "
-            f"pts/poss against him{_cmp_suffix(ppp, avg)}.")
+        if avg is None or ppp >= avg:
+            # A real edge: he scores at/above his own average here.
+            out["kind"] = "observed"
+            out["sentence"] = (
+                f"Attack {best['DEF_PLAYER_NAME']} — {my_player} scored {ppp:.2f} "
+                f"pts/poss against him{_cmp_suffix(ppp, avg)}.")
+        else:
+            # His best observed matchup is still below his average — no proven
+            # edge. Don't say "attack"; surface a projected edge if there is one.
+            observed = set(vs_opp["DEF_PLAYER_NAME"])
+            p = _top_projected_edge(my_player, my_team, opponent, season, observed)
+            head = (f"No proven edge vs {opponent} — {my_player} is below his "
+                    f"{avg:.2f} average against everyone he's faced "
+                    f"(best: {best['DEF_PLAYER_NAME']}, {ppp:.2f}).")
+            if p and p["score"] > 0:
+                out["kind"] = "projected"
+                out["sentence"] = (f"{head} Projected best edge: {p['defender']} "
+                                   f"({p['label']}).")
+            else:
+                out["kind"] = "observed"
+                out["sentence"] = head
     else:
-        try:
-            proj = [r for r in cached_projected_vs_roster(
-                my_player, my_team, opponent, season) if not r.get("insufficient")]
-            proj.sort(key=lambda r: r["score"], reverse=True)
-        except Exception:
-            proj = []
-        if proj:
-            best = proj[0]
+        # No head-to-head data at all — fall back to projections, but only call
+        # it an "attack" if the best projection is actually favourable.
+        p = _top_projected_edge(my_player, my_team, opponent, season)
+        if p and p["score"] > 0:
             out["kind"] = "projected"
-            out["sentence"] = (f"Attack {best['defender']} — projected best edge "
-                               f"vs {opponent} ({best['label']}).")
+            out["sentence"] = (f"Attack {p['defender']} — projected best edge vs "
+                               f"{opponent} ({p['label']}).")
+        elif p:
+            out["kind"] = "projected"
+            out["sentence"] = (f"No favourable matchup projected vs {opponent} — "
+                               f"closest is {p['defender']} ({p['label']}).")
         else:
             out["sentence"] = f"No usable matchup data vs {opponent} yet."
     return out
@@ -787,8 +829,10 @@ GLOSSARY = {
            "when guarded by that defender."),
     "projection": ("Projection", "the estimated verdict for a matchup with no "
                    "real data: *Favourable*, *Neutral*, or *Tough* for the scorer."),
-    "edge": ("Edge score", "the projection's underlying number; positive favours "
-             "the scorer, negative favours the defender."),
+    "edge": ("Edge score", "the projection's underlying number — a weighted FG% "
+             "edge on a roughly −0.10 to +0.10 scale: positive favours the "
+             "scorer, negative favours the defender, and within ±0.01 counts as "
+             "Neutral. So ±0.03 is a modest edge, ±0.08+ a strong one."),
     "ppg": ("PPG / RPG / APG", "the player's season per-game points, rebounds, "
             "and assists."),
     "ts": ("TS%", "true shooting % — scoring efficiency across 2s, 3s, and free "
