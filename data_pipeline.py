@@ -891,6 +891,8 @@ def best_defenders_projected(star_name, star_team, my_team, season):
 # Offensive matchup hunting — who to attack (their weak link) and with whom
 # ---------------------------------------------------------------------------
 ROTATION_MIN_MPG = 15.0   # only hunt defenders who actually play rotation minutes
+MIN_ATTACK_EDGE = 0.02    # an observed edge must clear this to count as a real seam
+                          # (smaller than this rounds to "+0.00" and is just noise)
 
 
 def _rotation_players(team_name, season, min_mpg=ROTATION_MIN_MPG):
@@ -948,8 +950,8 @@ def find_attack_mismatch(my_team, opponent, season):
         for _, r in vs.iterrows():
             ppp = float(r["PTS_PER_POSS"])
             edge = ppp - avg
-            if edge <= 0:
-                continue                      # not a genuine edge for this player
+            if edge < MIN_ATTACK_EDGE:
+                continue                      # not a meaningful edge for this player
             cand = {"attacker": attacker, "defender": r["DEF_PLAYER_NAME"],
                     "kind": "observed", "ppp": round(ppp, 2),
                     "attacker_avg": round(avg, 2), "edge": round(edge, 2),
@@ -967,7 +969,8 @@ def find_attack_mismatch(my_team, opponent, season):
                 res = project_matchup(attacker, my_team, defender, season)
             except Exception:
                 continue
-            if res.get("insufficient") or res["score"] <= 0:
+            # Only a genuinely Favourable projection counts as a seam to hunt.
+            if res.get("insufficient") or res["score"] < PROJ_FAVOURABLE_CUTOFF:
                 continue
             if best_proj is None or res["score"] > best_proj["score"]:
                 best_proj = {"attacker": attacker, "defender": defender,
