@@ -584,15 +584,71 @@ def show_projected_table(results, exclude_names=None, reason_key="reason",
         st.caption(f"{excluded} player(s) excluded — insufficient defensive data.")
 
 
-def lowest_make_area_weighted(shots):
-    """Coldest side for the attacker, weighting make% by shot VOLUME.
+def force_direction_chart(shots, recommended):
+    """Small grouped bar chart supporting the 'force him {direction}' tip:
+    per direction (Left / Centre / Right), his make% and his shot volume, with
+    the recommended (coldest) direction highlighted. Returns a fig or None."""
+    import numpy as np
 
-    Buckets SHOT_ZONE_AREA into left / right / down the middle and computes each
-    bucket's make% as total makes / total attempts (so a high-volume sub-zone
-    dominates its bucket, instead of a flat average of percentages). Backcourt
-    heaves are dropped. Returns (label, make_pct, attempts) or None."""
-    df = shots.copy()
+    b = direction_breakdown(shots)
+    if not b:
+        return None
+    order = [("left", "Left"), ("down the middle", "Centre"), ("right", "Right")]
+    labels, makes, vols, keys = [], [], [], []
+    for key, disp in order:
+        if key in b:
+            labels.append(disp)
+            makes.append(b[key]["make_pct"])
+            vols.append(b[key]["attempts"])
+            keys.append(key)
+    n = len(labels)
+    if n == 0:
+        return None
+    rec_idx = keys.index(recommended) if recommended in keys else None
 
+    surface = "#1e2125"
+    fig, ax = plt.subplots(figsize=(4.3, 2.4))
+    fig.patch.set_facecolor(surface)
+    ax.set_facecolor(surface)
+    ax2 = ax.twinx()
+
+    x = np.arange(n)
+    w = 0.38
+    # Make% bars on the left axis; the recommended (coldest) side is highlighted
+    # red, the others muted, so the chart confirms the text tip at a glance.
+    make_colours = ["#d18a8a" if i == rec_idx else "#5a6b7d" for i in range(n)]
+    ax.bar(x - w / 2, makes, w, color=make_colours, zorder=3)
+    # Volume (attempts) bars on the right axis, muted blue.
+    ax2.bar(x + w / 2, vols, w, color="#3f5e74", zorder=3)
+
+    ax.set_ylim(0, max(100, max(makes) * 1.1))
+    ax2.set_ylim(0, max(vols) * 1.25 if vols else 1)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, color="#c4c8cd", fontsize=8)
+    if rec_idx is not None:
+        ax.get_xticklabels()[rec_idx].set_color("#e0a3a3")
+        ax.get_xticklabels()[rec_idx].set_fontweight("bold")
+        ax.annotate("force here", xy=(rec_idx, 0), xytext=(rec_idx, -18),
+                    textcoords="data", ha="center", fontsize=7.5,
+                    color="#d18a8a", annotation_clip=False)
+
+    ax.set_ylabel("Make %", color="#9aa6b2", fontsize=8)
+    ax2.set_ylabel("Attempts", color="#7fa0b8", fontsize=8)
+    for a in (ax, ax2):
+        a.tick_params(colors="#7a8088", labelsize=7)
+        for s in a.spines.values():
+            s.set_color("#3a3f45")
+    ax.set_axisbelow(True)
+    ax.grid(axis="y", color="#2c3036", linewidth=0.6)
+    fig.tight_layout()
+    return fig
+
+
+def direction_breakdown(shots):
+    """Volume-weighted make% and attempts per direction (left / down the middle /
+    right), bucketing SHOT_ZONE_AREA. Each bucket's make% = total makes / total
+    attempts. Backcourt heaves dropped. Returns
+    {label: {"make_pct": float, "attempts": int}} or {}."""
     def bucket(zone):
         if "Back Court" in zone:
             return None
@@ -602,19 +658,30 @@ def lowest_make_area_weighted(shots):
             return "right"
         return "down the middle"
 
+    df = shots.copy()
     df["_bucket"] = df["SHOT_ZONE_AREA"].map(bucket)
     df = df[df["_bucket"].notna()]
     if df.empty:
-        return None
-
+        return {}
     grp = df.groupby("_bucket")["SHOT_MADE_FLAG"].agg(makes="sum", attempts="count")
-    grp = grp[grp["attempts"] > 0]
-    if grp.empty:
+    out = {}
+    for label in ("left", "down the middle", "right"):
+        if label in grp.index and grp.loc[label, "attempts"] > 0:
+            a = int(grp.loc[label, "attempts"])
+            m = float(grp.loc[label, "makes"])
+            out[label] = {"make_pct": round(m / a * 100, 1), "attempts": a}
+    return out
+
+
+def lowest_make_area_weighted(shots):
+    """Coldest side for the attacker (lowest volume-weighted make%). Returns
+    (label, make_pct, attempts) or None. Same logic as `direction_breakdown`,
+    so the chart and the 'force him' sentence always agree."""
+    b = direction_breakdown(shots)
+    if not b:
         return None
-    grp["make_pct"] = grp["makes"] / grp["attempts"] * 100
-    grp = grp.sort_values("make_pct")
-    coldest = grp.iloc[0]
-    return grp.index[0], round(float(coldest["make_pct"]), 1), int(coldest["attempts"])
+    label = min(b, key=lambda k: b[k]["make_pct"])
+    return label, b[label]["make_pct"], b[label]["attempts"]
 
 
 # -----------------------------------------------------------------------------
@@ -1305,6 +1372,17 @@ with tab_defend:
                 tk = defend_takeaway(star, opponent, my_team, season)
                 render_plan("DEFENSIVE PLAN", tk["sentence"], accent="defend",
                             sub=tk.get("force"))
+
+                # Small visual backing the "force him" tip — make% + volume by
+                # direction, with the recommended (coldest) side highlighted.
+                if tk.get("force") and not shots.empty:
+                    area = lowest_make_area_weighted(shots)
+                    rec = area[0] if area else None
+                    fig = force_direction_chart(shots, rec)
+                    if fig is not None:
+                        fc, _ = st.columns([3, 4])   # keep it small
+                        with fc:
+                            st.pyplot(fig)
 
                 # --- Scouting summary + shot chart ---
                 if shots.empty:
