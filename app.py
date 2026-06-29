@@ -129,6 +129,11 @@ def cached_recommend_defender(star, opponent, my_team, season):
     return dp.recommend_defender(star, opponent, my_team, season)
 
 
+@st.cache_data(show_spinner=False)
+def cached_position_map(season):
+    return dp.get_player_position_map(season)
+
+
 def _default_index(names, target):
     """Index of `target` in `names`, tolerant of case/accent-ish mismatches;
     falls back to 0 so a dropdown always has a valid default."""
@@ -453,52 +458,76 @@ def _html_table(headers, rows):
                 unsafe_allow_html=True)
 
 
-def show_matchup_table(df, source="actual"):
+def show_matchup_table(df, source="actual", positions=None, limit=None):
     """Render an observed-matchup frame as a styled table with a Source pill on
     every row. Numbers formatted: FG%/3PT% one-decimal %, possessions 1dp,
-    pts/poss 2dp."""
+    pts/poss 2dp.
+
+    `positions` (name -> pos dict) adds a defender Position column. `limit` caps
+    the visible rows; the rest go behind a 'Show all' expander."""
     if df.empty:
         st.caption("No defenders in this group.")
         return
     view = df[DISPLAY_COLS].rename(columns=COL_RENAME).copy()
     pill = _source_pill(source)
-    headers = ["Source"] + list(view.columns)
+    pos = positions or {}
+    headers = ["Source", "Defender", "Team"]
+    if positions is not None:
+        headers.append("Pos")
+    headers += ["Possessions guarded", "Points scored", "Points per possession",
+                "FG%", "3PT%"]
     rows = []
     for _, r in view.iterrows():
-        rows.append([
-            pill,
-            r["Defender"], r["Team"],
+        row = [pill, r["Defender"], r["Team"]]
+        if positions is not None:
+            row.append(pos.get(r["Defender"], "—"))
+        row += [
             f"{r['Possessions guarded']:.1f}",
             f"{r['Points scored']:.0f}",
             f"{r['Points per possession']:.2f}",
             f"{r['FG%'] * 100:.1f}%",
             f"{r['3PT%'] * 100:.1f}%",
-        ])
-    _html_table(headers, rows)
+        ]
+        rows.append(row)
+
+    if limit and len(rows) > limit:
+        _html_table(headers, rows[:limit])
+        with st.expander(f"Show all {len(rows)} defenders"):
+            _html_table(headers, rows[limit:])
+    else:
+        _html_table(headers, rows)
 
 
-def show_projected_table(results, exclude_names=None, reason_key="reason"):
+def show_projected_table(results, exclude_names=None, reason_key="reason",
+                         positions=None):
     """Render projected matchup dicts as a styled table: Projected pill, a
     colour-coded verdict, edge score, and the reason.
 
     `reason_key` picks the wording: "reason" (Attack — "he" is my attacker) or
     "reason_defend" (Defend — row is a defender, scouted player is the shooter).
-    Players with no usable defensive data are dropped; a small grey line notes
-    how many."""
+    `positions` (name -> pos dict) adds a defender Position column. Players with
+    no usable defensive data are dropped; a small grey line notes how many."""
     exclude = exclude_names or set()
+    pos = positions or {}
     usable = [r for r in results if r["defender"] not in exclude]
     excluded = sum(1 for r in usable if r.get("insufficient"))
     keep = [r for r in usable if not r.get("insufficient")]
     if keep:
         pill = _source_pill("projected")
+        headers = ["Source", "Defender"]
+        if positions is not None:
+            headers.append("Pos")
+        headers += ["Projection", "Edge score", "Why"]
         rows = []
         for r in keep:
             score = r["score"] if abs(r["score"]) >= 0.005 else 0.0
-            rows.append([
-                pill, r["defender"], _label_html(r["label"]),
-                f"{score:.2f}", r.get(reason_key, r["reason"]),
-            ])
-        _html_table(["Source", "Defender", "Projection", "Edge score", "Why"], rows)
+            row = [pill, r["defender"]]
+            if positions is not None:
+                row.append(pos.get(r["defender"], "—"))
+            row += [_label_html(r["label"]), f"{score:.2f}",
+                    r.get(reason_key, r["reason"])]
+            rows.append(row)
+        _html_table(headers, rows)
         st.caption("Edge score = weighted FG% edge, roughly −0.10 to +0.10 "
                    "(positive favours the scorer). Within ±0.01 is Neutral; "
                    "±0.03 a modest edge, ±0.08+ a strong one.")
@@ -1339,10 +1368,17 @@ with tab_attack:
                 tk = attack_takeaway(my_player, my_team, opponent, season)
                 render_plan("ATTACK PLAN", tk["sentence"], accent="attack")
 
+                # Defender positions, so the user can see if a matchup is
+                # positionally realistic (guard vs centre).
+                try:
+                    positions = cached_position_map(season)
+                except Exception:
+                    positions = {}
+
                 # --- Observed matchups vs the opponent ---
                 st.markdown(f"### vs {opponent}'s defenders")
                 source_legend("Best edges first.")
-                show_matchup_table(vs_opp, source="actual")
+                show_matchup_table(vs_opp, source="actual", positions=positions)
 
                 # --- Projected edges vs opponent defenders he hasn't faced enough ---
                 observed_names = set(vs_opp["DEF_PLAYER_NAME"])
@@ -1357,11 +1393,13 @@ with tab_attack:
                 st.caption("Projected matchups estimate the battle from each "
                            "player's season profile when they haven't directly "
                            "faced off. Treat as a guide, not a certainty.")
-                show_projected_table(proj, exclude_names=observed_names)
+                show_projected_table(proj, exclude_names=observed_names,
+                                     positions=positions)
 
                 st.markdown("### League-wide (for context)")
-                st.caption("Every other defender he faced, best edges first.")
-                show_matchup_table(league, source="actual")
+                st.caption("Top 10 by edge; expand to see the rest.")
+                show_matchup_table(league, source="actual", positions=positions,
+                                   limit=10)
 
     render_glossary("attack")
 

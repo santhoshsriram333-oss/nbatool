@@ -375,6 +375,27 @@ def get_top_scorer(team_name, season):
 # ---------------------------------------------------------------------------
 # Player card data — photo, headline stats, season efficiency
 # ---------------------------------------------------------------------------
+@functools.lru_cache(maxsize=None)
+def get_player_position_map(season):
+    """Map player name -> position (G / F / C / F-C, etc.) for the whole league.
+
+    LeagueDashPlayerStats carries no position field, so we aggregate POSITION
+    from every team's CommonTeamRoster (all cached). Used to show whether an
+    Attack-tab matchup is positionally realistic (guard vs centre)."""
+    out = {}
+    for t in teams.get_teams():
+        try:
+            r = get_roster(t["full_name"], season)
+        except Exception:
+            continue
+        if "PLAYER" in r.columns and "POSITION" in r.columns:
+            for _, row in r.iterrows():
+                pos = str(row["POSITION"]).strip()
+                if pos and pos.lower() != "nan":
+                    out[row["PLAYER"]] = pos
+    return out
+
+
 def get_player_photo_url(player_name):
     """NBA CDN headshot URL (1040x760 png) for a player, via their player id."""
     pid = get_player_id(player_name)
