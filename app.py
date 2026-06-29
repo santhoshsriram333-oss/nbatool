@@ -223,61 +223,108 @@ def shot_chart_figure(shots):
 
 
 MIN_ZONE_ATTEMPTS = 5   # below this in a zone, the make% is too noisy to colour
+MIN_HEX_ATTEMPTS = 3    # below this in a hex bin, show neutral grey (low sample)
+HEX_GRIDSIZE = 17       # hexagons across the court width (bigger bins = cleaner zones)
+HEX_EXTENT = (-250, 250, -47.5, 422.5)
 
 
 def hot_cold_shot_chart(shots, league_avg_df):
-    """Zone-shaded hot/cold chart: each shot coloured by the player's make% in
-    its court zone vs the league average there (green = above, red = below).
-    Zones with fewer than MIN_ZONE_ATTEMPTS shots are shown neutral grey so a
-    tiny sample never paints an extreme colour. Keeps the half-court drawing."""
+    """Goldsberry-style hexbin hot/cold chart. Shots are aggregated into
+    hexagonal bins across the half-court, encoding two variables:
+      - hex SIZE  = shot volume from that spot (bigger = more attempts)
+      - hex COLOUR = player make% there vs the league average for that zone
+                     (green = above/hot, red = below/cold)
+    Bins with fewer than MIN_HEX_ATTEMPTS shots are drawn small and neutral grey
+    (low sample). Court lines are drawn on top so they stay visible. Pure
+    rendering change — the data (get_shots) is untouched."""
     import numpy as np
+    import matplotlib as mpl
+    from matplotlib.patches import RegularPolygon
 
-    # League FG% per (zone, area), aggregated over shot-distance ranges.
+    # League FG% per (zone, area), and a per-shot league baseline for each shot.
     la = league_avg_df.groupby(["SHOT_ZONE_BASIC", "SHOT_ZONE_AREA"]).agg(
         fgm=("FGM", "sum"), fga=("FGA", "sum"))
     la["lpct"] = la["fgm"] / la["fga"].where(la["fga"] > 0)
     league_pct = la["lpct"].to_dict()
+    overall_lg = (float(league_avg_df["FGM"].sum())
+                  / max(float(league_avg_df["FGA"].sum()), 1.0))
 
-    # Player make% per zone, and the diff vs league (None if below the floor).
-    pg = shots.groupby(["SHOT_ZONE_BASIC", "SHOT_ZONE_AREA"])["SHOT_MADE_FLAG"] \
-        .agg(makes="sum", att="count")
-    zone_diff = {}
-    for key, row in pg.iterrows():
-        lp = league_pct.get(key)
-        if row["att"] < MIN_ZONE_ATTEMPTS or lp is None or pd.isna(lp):
-            zone_diff[key] = None
-        else:
-            zone_diff[key] = row["makes"] / row["att"] - lp
-
+    x = shots["LOC_X"].to_numpy(dtype=float)
+    y = shots["LOC_Y"].to_numpy(dtype=float)
+    made = shots["SHOT_MADE_FLAG"].to_numpy(dtype=float)
     keys = list(zip(shots["SHOT_ZONE_BASIC"], shots["SHOT_ZONE_AREA"]))
-    diffs = np.array([zone_diff.get(k) if zone_diff.get(k) is not None else np.nan
-                      for k in keys], dtype=float)
-    xs, ys = shots["LOC_X"].to_numpy(), shots["LOC_Y"].to_numpy()
-    neutral = np.isnan(diffs)
+    lg_per_shot = np.array(
+        [league_pct[k] if (k in league_pct and not pd.isna(league_pct[k]))
+         else overall_lg for k in keys], dtype=float)
 
     surface = "#1e2125"
     fig, ax = plt.subplots(figsize=(6, 5.6))
     fig.patch.set_facecolor(surface)
     ax.set_facecolor(surface)
 
-    ax.scatter(xs[neutral], ys[neutral], c="#555a61", s=16, alpha=0.5,
-               edgecolors="none", label=f"low sample (<{MIN_ZONE_ATTEMPTS})")
-    sc = ax.scatter(xs[~neutral], ys[~neutral], c=diffs[~neutral], cmap="RdYlGn",
-                    vmin=-0.12, vmax=0.12, s=28, alpha=0.88, edgecolors="none")
+    # Use hexbin once just to get the hex-lattice centres (we draw the hexes
+    # ourselves so we can vary their size). Each shot then belongs to its nearest
+    # centre — for a hex lattice that is exactly its hexagonal cell.
+    hb = ax.hexbin(x, y, gridsize=HEX_GRIDSIZE, extent=HEX_EXTENT, mincnt=1)
+    centres = np.asarray(hb.get_offsets(), dtype=float)
+    hb.remove()
 
-    draw_court(ax, color="#7a8088")
+    if len(centres) == 0:
+        draw_court(ax, color="#7a8088")
+        ax.set_xlim(-250, 250)
+        ax.set_ylim(422.5, -47.5)
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect("equal")
+        return fig
+
+    ox, oy = centres[:, 0], centres[:, 1]
+    idx = ((x[:, None] - ox[None, :]) ** 2
+           + (y[:, None] - oy[None, :]) ** 2).argmin(axis=1)
+    nbins = len(centres)
+    counts = np.bincount(idx, minlength=nbins).astype(float)
+    makes = np.bincount(idx, weights=made, minlength=nbins)
+    lgsum = np.bincount(idx, weights=lg_per_shot, minlength=nbins)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pmake = np.where(counts > 0, makes / counts, np.nan)
+        lgbase = np.where(counts > 0, lgsum / counts, np.nan)
+    diff = pmake - lgbase
+
+    # Hex sizing: radius scales with sqrt(volume) so area ~ attempts.
+    cell = (HEX_EXTENT[1] - HEX_EXTENT[0]) / HEX_GRIDSIZE
+    r_max, r_min = cell * 0.62, cell * 0.18
+    peak = counts.max() if counts.max() > 0 else 1.0
+    cmap = mpl.cm.RdYlGn
+    norm = mpl.colors.Normalize(vmin=-0.12, vmax=0.12)
+
+    for i in range(nbins):
+        c = counts[i]
+        if c <= 0:
+            continue
+        if c < MIN_HEX_ATTEMPTS or np.isnan(diff[i]):
+            # low sample -> small, faint grey so it recedes (still shown)
+            colour, radius, alpha = "#555a61", r_min * 0.6, 0.4
+        else:
+            colour = cmap(norm(diff[i]))
+            radius = r_min + (r_max - r_min) * np.sqrt(c / peak)
+            alpha = 0.92
+        ax.add_patch(RegularPolygon((ox[i], oy[i]), numVertices=6, radius=radius,
+                                    orientation=0.0, facecolor=colour,
+                                    edgecolor="none", alpha=alpha, zorder=1))
+
+    draw_court(ax, color="#8a9198", lw=1.4)            # court lines on top
     ax.set_xlim(-250, 250)
     ax.set_ylim(422.5, -47.5)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_aspect("equal")
+    ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect("equal")
 
-    cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02,
-                        ticks=[-0.12, 0, 0.12])
+    sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.02, ticks=[-0.12, 0, 0.12])
     cbar.ax.set_yticklabels(["cold", "avg", "hot"])
     cbar.ax.tick_params(colors="#b7bcc2")
     cbar.outline.set_edgecolor("#3a3f45")
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.2, labelcolor="#b7bcc2")
+    # Legend: low-sample swatch + a note that hex size = volume.
+    proxy = RegularPolygon((0, 0), numVertices=6, radius=1, facecolor="#555a61",
+                           edgecolor="none")
+    ax.legend([proxy], [f"low sample (<{MIN_HEX_ATTEMPTS})"], loc="upper right",
+              fontsize=7, framealpha=0.2, labelcolor="#b7bcc2", handlelength=1.0)
     return fig
 
 
@@ -1281,8 +1328,10 @@ with tab_defend:
                         st.table({"Make %": _pct_dict(summary["make_pct_by_area"])})
 
                     st.markdown("### Shot chart")
-                    st.caption("Each shot shaded by his make% in that zone vs the "
-                               "league average there — green = hot, red = cold.")
+                    st.caption("Hexbin map — hex size = shot volume (bigger = more "
+                               "attempts), colour = make% vs the league average "
+                               "there (green = hot, red = cold). Faint grey = low "
+                               "sample.")
                     chart_col, _ = st.columns([2, 1])
                     with chart_col:
                         try:
