@@ -979,6 +979,55 @@ def find_attack_mismatch(my_team, opponent, season):
     return best_proj
 
 
+def recommend_defender(star_name, star_team, my_team, season):
+    """Which of my players to assign to guard the opponent's star.
+
+    Mirrors find_attack_mismatch's rotation guardrail: only my-team players who
+    pass the same ROTATION_MIN_MPG filter are considered, so a bench guy with one
+    good 40-possession stretch can't be recommended on a superstar. Prefers a
+    real observed matchup (best = fewest points per possession allowed, 40+ poss
+    via get_matchups' floor); if no rotation defender has observed data, falls
+    back to the best rotation defender by projection. Returns
+    {defender, kind, ...} or None.
+    """
+    try:
+        my_abbr = get_team_abbreviation(my_team)
+    except Exception:
+        return None
+    rotation = _rotation_players(my_team, season)
+
+    # 1) Observed: best rotation defender who has actually guarded the star.
+    try:
+        mu = annotate_matchups_with_team(get_matchups(star_name, season), season)
+    except Exception:
+        mu = None
+    if mu is not None and not mu.empty:
+        roster_def = mu[mu["TEAM"] == my_abbr]
+        if rotation:                          # skip filter only if we have no MPG data
+            roster_def = roster_def[roster_def["DEF_PLAYER_NAME"].isin(rotation)]
+        roster_def = roster_def.sort_values("PTS_PER_POSS", ascending=True)
+        if not roster_def.empty:
+            r = roster_def.iloc[0]
+            return {"defender": r["DEF_PLAYER_NAME"], "kind": "observed",
+                    "ppp": round(float(r["PTS_PER_POSS"]), 2),
+                    "poss": round(float(r["PARTIAL_POSS"]), 1)}
+
+    # 2) Fallback: best rotation defender by projection (clearly labelled).
+    try:
+        proj = [p for p in best_defenders_projected(star_name, star_team,
+                                                    my_team, season)
+                if not p.get("insufficient")]
+    except Exception:
+        proj = []
+    if rotation:
+        proj = [p for p in proj if p["defender"] in rotation]
+    if proj:
+        best = proj[0]                        # already sorted toughest-first
+        return {"defender": best["defender"], "kind": "projected",
+                "label": best["label"]}
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Quick manual test — run this file directly to check all four functions work.
 # I use Jokić because his data is rich enough to eyeball whether the numbers

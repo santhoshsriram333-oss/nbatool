@@ -123,6 +123,11 @@ def cached_attack_mismatch(my_team, opponent, season):
     return dp.find_attack_mismatch(my_team, opponent, season)
 
 
+@st.cache_data(show_spinner=False)
+def cached_recommend_defender(star, opponent, my_team, season):
+    return dp.recommend_defender(star, opponent, my_team, season)
+
+
 def _default_index(names, target):
     """Index of `target` in `names`, tolerant of case/accent-ish mismatches;
     falls back to 0 so a dropdown always has a valid default."""
@@ -561,39 +566,32 @@ def _cmp_suffix(value, avg):
 def defend_takeaway(star, opponent, my_team, season):
     """Defensive takeaway used by the Defend tab and Overview. Returns
     {sentence, force, kind, assigned}; kind in {observed, projected, none}.
-    `assigned` is the my-team defender we'd put on the star (or None)."""
+    `assigned` is the my-team defender we'd put on the star (or None).
+
+    The defender is chosen by dp.recommend_defender, which only considers
+    rotation players (same ROTATION_MIN_MPG filter as the attack side) — so the
+    'Assign X' plan and the radar that uses it never surface a bench artifact."""
     out = {"sentence": None, "force": None, "kind": "none", "assigned": None}
     try:
-        matchups = cached_matchups(star, season)
-        my_abbr = cached_team_abbr(my_team)
+        rec = cached_recommend_defender(star, opponent, my_team, season)
     except Exception:
-        return out
+        rec = None
     avg = cached_avg_ppp(star, season)
 
-    roster_def = matchups[matchups["TEAM"] == my_abbr].sort_values("PTS_PER_POSS")
-    if not roster_def.empty:
-        best = roster_def.iloc[0]
-        ppp = best["PTS_PER_POSS"]
+    if rec and rec["kind"] == "observed":
         out["kind"] = "observed"
-        out["assigned"] = best["DEF_PLAYER_NAME"]
+        out["assigned"] = rec["defender"]
         out["sentence"] = (
-            f"Assign {best['DEF_PLAYER_NAME']} — held {star} to {ppp:.2f} "
-            f"pts/poss over {best['PARTIAL_POSS']:.0f} possessions"
-            f"{_cmp_suffix(ppp, avg)}.")
+            f"Assign {rec['defender']} — held {star} to {rec['ppp']:.2f} "
+            f"pts/poss over {rec['poss']:.0f} possessions"
+            f"{_cmp_suffix(rec['ppp'], avg)}.")
+    elif rec and rec["kind"] == "projected":
+        out["kind"] = "projected"
+        out["assigned"] = rec["defender"]
+        out["sentence"] = (f"Assign {rec['defender']} — projected best rotation "
+                           f"matchup vs {star} ({rec['label']}).")
     else:
-        try:
-            proj = [r for r in cached_best_defenders_projected(
-                star, opponent, my_team, season) if not r.get("insufficient")]
-        except Exception:
-            proj = []
-        if proj:
-            best = proj[0]
-            out["kind"] = "projected"
-            out["assigned"] = best["defender"]
-            out["sentence"] = (f"Assign {best['defender']} — projected best "
-                               f"matchup vs {star} ({best['label']}).")
-        else:
-            out["sentence"] = f"No usable matchup data vs {star} yet."
+        out["sentence"] = f"No rotation defender with matchup data vs {star} yet."
 
     try:
         shots = cached_shots(star, opponent, season)
