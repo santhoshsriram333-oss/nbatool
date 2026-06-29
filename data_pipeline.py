@@ -542,30 +542,42 @@ def _league_team_advanced(season):
 
 
 def get_four_factors(team_name, season):
-    """A team's four factors: EFG_PCT, FTA_RATE, TM_TOV_PCT, OREB_PCT.
+    """A team's four factors: EFG_PCT, FTA_RATE, TM_TOV_PCT, OREB_PCT, each with
+    its league rank (rank 1 = best — the NBA already accounts for direction, so
+    rank 1 is lowest turnovers and highest eFG/FTA/OREB), plus total_teams.
 
     Pulls LeagueDashTeamStats with the Four Factors measure type. If that call
-    errors, falls back to the Advanced team table (which carries efg/tov/oreb);
-    fta_rate may stay None in that fallback. Missing values come back as None.
+    errors, falls back to the Advanced team table (which carries efg/tov/oreb,
+    no fta_rate, no ranks). Missing values come back as None.
     """
-    out = {"efg_pct": None, "fta_rate": None,
-           "tm_tov_pct": None, "oreb_pct": None}
+    out = {"efg_pct": None, "fta_rate": None, "tm_tov_pct": None, "oreb_pct": None,
+           "efg_pct_rank": None, "fta_rate_rank": None, "tm_tov_pct_rank": None,
+           "oreb_pct_rank": None, "total_teams": None}
     try:
         team_id = get_team_id(team_name)
     except Exception:
         return out
 
-    fields = [("efg_pct", "EFG_PCT"), ("fta_rate", "FTA_RATE"),
-              ("tm_tov_pct", "TM_TOV_PCT"), ("oreb_pct", "OREB_PCT")]
+    # key -> (value column, rank column)
+    fields = [("efg_pct", "EFG_PCT", "EFG_PCT_RANK"),
+              ("fta_rate", "FTA_RATE", "FTA_RATE_RANK"),
+              ("tm_tov_pct", "TM_TOV_PCT", "TM_TOV_PCT_RANK"),
+              ("oreb_pct", "OREB_PCT", "OREB_PCT_RANK")]
     try:
         df = _league_four_factors(season)
+        out["total_teams"] = int(len(df))
         row = df[df["TEAM_ID"] == team_id]
         if not row.empty:
             r = row.iloc[0]
-            for key, col in fields:
+            for key, col, rcol in fields:
                 if col in df.columns:
                     try:
                         out[key] = float(r[col])
+                    except (TypeError, ValueError):
+                        pass
+                if rcol in df.columns:
+                    try:
+                        out[key + "_rank"] = int(r[rcol])
                     except (TypeError, ValueError):
                         pass
             return out

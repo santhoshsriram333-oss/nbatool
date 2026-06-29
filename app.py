@@ -805,9 +805,11 @@ def render_four_factors(my_team, opponent, my_ff, opp_ff):
     except Exception:
         opp_abbr = "OPP"
 
+    total = my_ff.get("total_teams") or opp_ff.get("total_teams")
     html = ""
     for label, key, higher_better, kind in FF_FACTORS:
         a, b = my_ff.get(key), opp_ff.get(key)
+        a_rank, b_rank = my_ff.get(key + "_rank"), opp_ff.get(key + "_rank")
         a_win = b_win = False
         if a is not None and b is not None and a != b:
             if (a > b) == higher_better:
@@ -817,17 +819,72 @@ def render_four_factors(my_team, opponent, my_ff, opp_ff):
         scale = max([v for v in (a, b) if v is not None], default=0)
 
         rows = ""
-        for name, value, win in ((my_abbr, a, a_win), (opp_abbr, b, b_win)):
+        for name, value, rank, win in ((my_abbr, a, a_rank, a_win),
+                                       (opp_abbr, b, b_rank, b_win)):
             width = 0 if value is None or scale <= 0 else max(3, value / scale * 100)
             fill = "ff-win" if win else "ff-lose"
             vcls = "ff-val win" if win else "ff-val"
+            # rank 1 = best for all four factors, so rank_cue colours uniformly
+            cue = rank_cue(rank, total)
+            rank_html = (f"<span class='ff-rank' style='color:{cue}'>#{rank}</span>"
+                         if rank and total else "")
             rows += (f"<div class='ff-side'><span class='ff-name'>{name}</span>"
                      f"<div class='ff-track'><div class='ff-fill {fill}' "
                      f"style='width:{width:.0f}%'></div></div>"
-                     f"<span class='{vcls}'>{_ff_fmt(kind, value)}</span></div>")
+                     f"<span class='{vcls}'>{_ff_fmt(kind, value)}</span>"
+                     f"{rank_html}</div>")
         html += f"<div class='ff-row'><div class='ff-label'>{label}</div>{rows}</div>"
 
+    # caption clarifies the colour-coded ranks (out of `total` teams)
+    if total:
+        html += (f"<div class='ff-note'>Each value is ranked across all {total} "
+                 "teams — green = top third, grey = middle, red = bottom third "
+                 "(rank 1 = best; for turnovers that means fewest).</div>")
+
     st.markdown(html, unsafe_allow_html=True)
+
+
+# -----------------------------------------------------------------------------
+# Team identity — primary colours for the Game Plan header strip.
+# -----------------------------------------------------------------------------
+TEAM_COLORS = {
+    "Atlanta Hawks": "#E03A3E", "Boston Celtics": "#007A33",
+    "Brooklyn Nets": "#000000", "Charlotte Hornets": "#1D1160",
+    "Chicago Bulls": "#CE1141", "Cleveland Cavaliers": "#860038",
+    "Dallas Mavericks": "#00538C", "Denver Nuggets": "#0E2240",
+    "Detroit Pistons": "#C8102E", "Golden State Warriors": "#1D428A",
+    "Houston Rockets": "#CE1141", "Indiana Pacers": "#002D62",
+    "Los Angeles Clippers": "#C8102E", "Los Angeles Lakers": "#552583",
+    "Memphis Grizzlies": "#5D76A9", "Miami Heat": "#98002E",
+    "Milwaukee Bucks": "#00471B", "Minnesota Timberwolves": "#236192",
+    "New Orleans Pelicans": "#0C2340", "New York Knicks": "#F58426",
+    "Oklahoma City Thunder": "#007AC1", "Orlando Magic": "#0077C0",
+    "Philadelphia 76ers": "#006BB6", "Phoenix Suns": "#E56020",
+    "Portland Trail Blazers": "#E03A3E", "Sacramento Kings": "#5A2D81",
+    "San Antonio Spurs": "#C4CED4", "Toronto Raptors": "#CE1141",
+    "Utah Jazz": "#002B5C", "Washington Wizards": "#E31837",
+}
+
+
+def render_team_strip(my_team, opponent, season):
+    """Header strip: '{My Team} vs {Opponent} · {Season}' with each team's
+    primary colour as an accent and its logo (graceful if a logo doesn't load)."""
+    def badge(team):
+        color = TEAM_COLORS.get(team, "#888888")
+        logo = ""
+        try:
+            tid = dp.get_team_id(team)
+            logo = (f"<img class='team-logo' src='https://cdn.nba.com/logos/nba/"
+                    f"{tid}/primary/L/logo.svg' alt='' />")
+        except Exception:
+            pass
+        return (f"<span class='team-badge' style='border-left:5px solid {color}'>"
+                f"{logo}<span class='team-name'>{team}</span></span>")
+
+    st.markdown(
+        f"<div class='team-strip'>{badge(my_team)}<span class='vs'>vs</span>"
+        f"{badge(opponent)}<span class='season'>· {season}</span></div>",
+        unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
@@ -1013,8 +1070,7 @@ tab_overview, tab_attack, tab_defend, tab_close = st.tabs(
 # -----------------------------------------------------------------------------
 with tab_overview:
     st.subheader("Game Plan")
-    st.markdown(f"<div class='gp-header'>{my_team} vs {opponent} · {season}</div>",
-                unsafe_allow_html=True)
+    render_team_strip(my_team, opponent, season)
 
     try:
         opp_star = cached_top_scorer(opponent, season)
@@ -1050,7 +1106,10 @@ with tab_overview:
     col_def, col_att = st.columns(2)
 
     with col_def:
-        st.markdown("#### Defend their star")
+        if opp_star:
+            st.markdown(f"#### Our defensive assignment — who guards {opp_star}")
+        else:
+            st.markdown("#### Our defensive assignment")
         if opp_star:
             # Card shows OUR assigned defender (a my-team player), not their star.
             if defend_tk and defend_tk.get("assigned"):
@@ -1066,7 +1125,11 @@ with tab_overview:
             st.info(f"Couldn't load {opponent}'s top scorer.")
 
     with col_att:
-        st.markdown("#### Attack their weak link")
+        if mismatch:
+            st.markdown("#### Our attacking edge — who to hunt "
+                        f"{mismatch['defender']} with")
+        else:
+            st.markdown("#### Our attacking edge")
         if mismatch:
             # Feature OUR hunter (the player with the real edge), and name the
             # weak-link defender to attack in the plan text.

@@ -94,3 +94,28 @@ footer { visibility: hidden; }
     width: 52px; font-size: 0.72rem; color: #e3e5e8; flex-shrink: 0;
 }
 .ff-val.win { color: #74c79c; font-weight: 700; }
+.ff-rank {
+    width: 34px; font-size: 0.68rem; font-weight: 600; flex-shrink: 0;
+    text-align: right;
+}
+.ff-note {
+    font-size: 0.74rem; color: #8a9198; margin-top: 8px; padding-bottom: 4px;
+}
+
+/* Game Plan team-identity header strip. */
+.team-strip {
+    display: flex; align-items: center; gap: 14px;
+    margin: 2px 0 18px 0; flex-wrap: wrap;
+}
+.team-badge {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 7px 14px 7px 10px; border-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+}
+.team-logo { width: 30px; height: 30px; object-fit: contain; }
+.team-name { font-size: 1.02rem; font-weight: 600; color: #eceef0; }
+.team-strip .vs {
+    font-size: 0.82rem; color: #8a9198; text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.team-strip .season { font-size: 0.92rem; color: #9aa0a6; }
