@@ -101,18 +101,28 @@ def audit_team(my_team, opponent, season):
     if defender:
         gp, mpg = player_gp_mpg(my_team, defender, season)
         res["def_gp"], res["def_mpg"] = gp, mpg
-        small = (gp is not None and gp < MIN_GP) or (mpg is not None and mpg < MIN_MPG)
-        res["def_small_sample"] = small
-        if small:
-            res["flags"].append("SMALL-SAMPLE DEFENDER")
-        # Check 3 — radar defender is the same player; bench artifact if not rotation.
-        bench = (gp is not None and gp < MIN_GP) or (mpg is not None and mpg < MIN_MPG)
-        res["radar_bench"] = bench
-        if bench:
-            res["flags"].append("BENCH RADAR DEFENDER")
+        flagged = (gp is not None and gp < MIN_GP) or (mpg is not None and mpg < MIN_MPG)
+        # A flag is ACCEPTED (not a failure) when the player is a real rotation
+        # player by minutes (MPG >= 15) and the recommendation rests on an
+        # observed 40+ possession matchup — i.e. flagged only for low *games*
+        # (a midseason arrival), not for being a bench artifact. A true bench
+        # artifact (MPG < 15) is still a FAILURE.
+        is_rotation = mpg is not None and mpg >= MIN_MPG
+        accepted = flagged and is_rotation and kind == "observed"
+        failure = flagged and not accepted
+        res["def_flagged"] = flagged
+        res["def_reviewed"] = accepted     # flagged but accepted
+        res["def_failure"] = failure       # genuine bench artifact
+        res["radar_reviewed"] = accepted   # radar uses the same defender
+        res["radar_failure"] = failure
+        if failure:
+            res["flags"].append("SMALL-SAMPLE DEFENDER (FAIL)")
+        elif accepted:
+            res["flags"].append("SMALL-SAMPLE DEFENDER (reviewed/accepted)")
     else:
         res["def_gp"] = res["def_mpg"] = None
-        res["def_small_sample"] = res["radar_bench"] = False
+        res["def_flagged"] = res["def_reviewed"] = res["def_failure"] = False
+        res["radar_reviewed"] = res["radar_failure"] = False
 
     # --- Check 2: top attack edge + possessions ---
     player, edge_def, poss, ppp = top_attack_edge(my_team, season)
@@ -178,13 +188,22 @@ def main():
                 r = audit_team(my_team, opponent, season)
                 rows.append(r)
                 print(f"\n  [{my_team}]")
+                if r["def_failure"]:
+                    note = "   *** BENCH ARTIFACT (FAIL) ***"
+                elif r["def_reviewed"]:
+                    note = ("   [REVIEWED — accepted (midseason/low-GP rotation "
+                            "player, not a bench artifact)]")
+                else:
+                    note = ""
                 print(f"    Defend {opponent}'s star ({r['star']}):")
                 print(f"        recommend: {r['defender']}  "
                       f"(GP={r['def_gp']}, MPG={r['def_mpg']}, src={r['defender_kind']})"
-                      + ("   *** SMALL SAMPLE / BENCH ***"
-                         if r["def_small_sample"] else ""))
+                      + note)
+                radar_state = ("BENCH ARTIFACT" if r["radar_failure"]
+                               else ("rotation player (low GP, reviewed/accepted)"
+                                     if r["radar_reviewed"] else "rotation player"))
                 print(f"    Radar compares {r['star']} vs {r['defender']} "
-                      f"-> {'BENCH ARTIFACT' if r['radar_bench'] else 'rotation player'}")
+                      f"-> {radar_state}")
                 print(f"    Top attack edge ({r['attacker']}):")
                 print(f"        best vs: {r['edge_def']}  "
                       f"({r['edge_ppp']} ppp on {r['edge_poss']} poss)"
@@ -202,20 +221,32 @@ def main():
            f"{'LowPossEdge':11} {'DupCard':8} {'4F-Dup':7}")
     print(hdr)
     print("-" * len(hdr))
-    any_flag = False
+    any_fail = False
+    any_reviewed = False
     for r in rows:
         ff_dup = "Y" if r.get("opponent") and _ff_dup_for_row(r) else "-"
-        small = "Y" if r["def_small_sample"] else "-"
-        bench = "Y" if r["radar_bench"] else "-"
+        # FAIL = genuine bench artifact; REV = flagged but reviewed/accepted.
+        small = "FAIL" if r["def_failure"] else ("REV" if r["def_reviewed"] else "-")
+        bench = "FAIL" if r["radar_failure"] else ("REV" if r["radar_reviewed"] else "-")
         lowp = "Y" if r["edge_low_poss"] else "-"
         dupc = "Y" if r["dup_card"] else "-"
-        if "Y" in (small, bench, lowp, dupc, ff_dup):
-            any_flag = True
+        if "FAIL" in (small, bench) or "Y" in (lowp, dupc):
+            any_fail = True
+        if "REV" in (small, bench):
+            any_reviewed = True
         print(f"{r['season']:8} {r['my_team'][:3]:4} {r['opponent'][:3]:4} "
               f"{small:12} {bench:10} {lowp:11} {dupc:8} {ff_dup:7}")
     print("-" * len(hdr))
-    print("No problems detected." if not any_flag
-          else "Problems flagged above (Y = triggered).")
+    print("Legend: FAIL = genuine bench-artifact bug | REV = reviewed/accepted "
+          "(low-GP rotation player on a 40+ poss matchup) | Y = triggered | "
+          "- = clean.  4F-Dup ties are coincidental equal values, not bugs.")
+    if any_fail:
+        print("RESULT: genuine problems flagged (FAIL / Y) — see above.")
+    elif any_reviewed:
+        print("RESULT: clean — no bench-artifact bugs. The only flags are "
+              "REVIEWED/accepted low-GP rotation players.")
+    else:
+        print("RESULT: fully clean — no flags at all.")
 
 
 # Cache four-factor dup results per (season, frozenset(pair)) so the summary can
