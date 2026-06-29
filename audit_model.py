@@ -76,11 +76,15 @@ def top_attack_edge(my_team, season):
             round(float(top["PARTIAL_POSS"]), 1), round(float(top["PTS_PER_POSS"]), 2))
 
 
+_FACTOR_KEYS = ["efg_pct", "fta_rate", "tm_tov_pct", "oreb_pct"]
+
+
 def four_factor_dupes(team_a, team_b, season):
-    """Returns (ff_a, ff_b, list_of_matching_factor_keys)."""
+    """Returns (ff_a, ff_b, list_of_matching_factor keys). Only compares the four
+    VALUE factors — not the rank/total_teams metadata, which would always match."""
     a = dp.get_four_factors(team_a, season)
     b = dp.get_four_factors(team_b, season)
-    matches = [k for k in a if a.get(k) is not None and a.get(k) == b.get(k)]
+    matches = [k for k in _FACTOR_KEYS if a.get(k) is not None and a.get(k) == b.get(k)]
     return a, b, matches
 
 
@@ -120,6 +124,28 @@ def audit_team(my_team, opponent, season):
     res["edge_low_poss"] = low_poss
     if low_poss:
         res["flags"].append("LOW-POSSESSION EDGE")
+
+    # --- Check 5: the two Game Plan cards must show DISTINCT players. ---
+    # Mirror app.py exactly: defensive card = recommended defender; attacking
+    # card = find_attack_mismatch(exclude=defender).attacker, else my_star (only
+    # if my_star isn't the assigned defender).
+    def_card = defender
+    exclude = {defender} if defender else None
+    try:
+        m = dp.find_attack_mismatch(my_team, opponent, season, exclude=exclude)
+    except Exception:
+        m = None
+    if m:
+        att_card = m["attacker"]
+    else:
+        my_star = dp.get_top_scorer(my_team, season)
+        att_card = my_star if (my_star and my_star != def_card) else None
+    res["def_card"] = def_card
+    res["att_card"] = att_card
+    dup = bool(def_card and att_card and def_card == att_card)
+    res["dup_card"] = dup
+    if dup:
+        res["flags"].append("DUPLICATE CARD")
 
     return res
 
@@ -163,13 +189,17 @@ def main():
                 print(f"        best vs: {r['edge_def']}  "
                       f"({r['edge_ppp']} ppp on {r['edge_poss']} poss)"
                       + ("   *** <40 POSS ***" if r["edge_low_poss"] else ""))
+                print(f"    Game Plan cards: DEF={r['def_card']}  ATT={r['att_card']}"
+                      + ("   *** DUPLICATE PLAYER ***" if r["dup_card"]
+                         else "   (distinct)"))
             print()
 
     # ---- Clean summary table ----
     print("\n" + "#" * 92)
     print("SUMMARY — which matchups trigger which problems")
     print("#" * 92)
-    hdr = f"{'Season':8} {'Team':4} {'vs':4} {'SmallSampDef':12} {'BenchRadar':10} {'LowPossEdge':11} {'4F-Dup':7}"
+    hdr = (f"{'Season':8} {'Team':4} {'vs':4} {'SmallSampDef':12} {'BenchRadar':10} "
+           f"{'LowPossEdge':11} {'DupCard':8} {'4F-Dup':7}")
     print(hdr)
     print("-" * len(hdr))
     any_flag = False
@@ -178,10 +208,11 @@ def main():
         small = "Y" if r["def_small_sample"] else "-"
         bench = "Y" if r["radar_bench"] else "-"
         lowp = "Y" if r["edge_low_poss"] else "-"
-        if "Y" in (small, bench, lowp, ff_dup):
+        dupc = "Y" if r["dup_card"] else "-"
+        if "Y" in (small, bench, lowp, dupc, ff_dup):
             any_flag = True
         print(f"{r['season']:8} {r['my_team'][:3]:4} {r['opponent'][:3]:4} "
-              f"{small:12} {bench:10} {lowp:11} {ff_dup:7}")
+              f"{small:12} {bench:10} {lowp:11} {dupc:8} {ff_dup:7}")
     print("-" * len(hdr))
     print("No problems detected." if not any_flag
           else "Problems flagged above (Y = triggered).")

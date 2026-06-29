@@ -119,8 +119,9 @@ def cached_clutch_stats(team_name, season):
 
 
 @st.cache_data(show_spinner="Finding the matchup to hunt…")
-def cached_attack_mismatch(my_team, opponent, season):
-    return dp.find_attack_mismatch(my_team, opponent, season)
+def cached_attack_mismatch(my_team, opponent, season, exclude_defender=None):
+    exclude = {exclude_defender} if exclude_defender else None
+    return dp.find_attack_mismatch(my_team, opponent, season, exclude=exclude)
 
 
 @st.cache_data(show_spinner=False)
@@ -1089,8 +1090,11 @@ with tab_overview:
             if opp_star else None
     except Exception:
         defend_tk = None
+    # Exclude the assigned defender from the attacker pool so the two Game Plan
+    # cards always show distinct players.
+    _assigned = defend_tk.get("assigned") if defend_tk else None
     try:
-        mismatch = cached_attack_mismatch(my_team, opponent, season)
+        mismatch = cached_attack_mismatch(my_team, opponent, season, _assigned)
     except Exception:
         mismatch = None
 
@@ -1151,8 +1155,9 @@ with tab_overview:
                 st.caption(f"Engine: {my_star} still runs the offence — keep "
                            "feeding him too.")
             st.caption("→ See the Attack tab for the full breakdown.")
-        elif my_star:
-            # No clear seam in the opponent's rotation — attack through our engine.
+        elif my_star and my_star != _assigned:
+            # No clear seam in the opponent's rotation — attack through our engine
+            # (only if he isn't the player already assigned to defend).
             render_player_card(my_star, my_team, season)
             render_plan("ATTACK PLAN",
                         f"No clear matchup edge vs {opponent} — attack through "
@@ -1160,7 +1165,8 @@ with tab_overview:
                         accent="attack")
             st.caption("→ See the Attack tab for the full breakdown.")
         else:
-            st.info(f"Couldn't load {my_team}'s roster.")
+            st.caption(f"No distinct attacking edge vs {opponent}'s rotation yet — "
+                       "see the Attack tab for the full breakdown.")
 
     # --- Four Factors team comparison ---
     st.markdown(f"#### Four Factors — {my_team} vs {opponent}")

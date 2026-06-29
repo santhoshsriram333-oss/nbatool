@@ -921,7 +921,7 @@ def _rotation_players(team_name, season, min_mpg=ROTATION_MIN_MPG):
     return set(df[df["MIN"] >= min_mpg]["PLAYER_NAME"])
 
 
-def find_attack_mismatch(my_team, opponent, season):
+def find_attack_mismatch(my_team, opponent, season, exclude=None):
     """The best offensive matchup to hunt: which of our players has the biggest
     scoring edge against which of the opponent's rotation defenders.
 
@@ -942,12 +942,25 @@ def find_attack_mismatch(my_team, opponent, season):
     opp_rotation = _rotation_players(opponent, season)
     if not opp_rotation:
         return None
+    # Only hunt WITH our own rotation players — a bench guy with a fluky 40-poss
+    # sample shouldn't be the recommended attacker either.
+    my_rotation = _rotation_players(my_team, season)
     try:
         my_roster = get_roster(my_team, season)["PLAYER"].tolist()
     except Exception:
         return None
+    if my_rotation:
+        my_roster = [p for p in my_roster if p in my_rotation]
+    # The player guarding their star isn't our primary hunter — exclude him so
+    # the attack card never duplicates the defensive-assignment card.
+    if exclude:
+        my_roster = [p for p in my_roster if p not in exclude]
 
-    # 1) Observed: real edges across our roster vs opponent rotation defenders.
+    # 1) Observed: among genuine-edge matchups vs opponent rotation defenders,
+    # pick the one with the highest raw points-per-possession. We rank by raw
+    # scoring (not edge-over-average) so a real offensive threat wins, rather
+    # than a low-usage defensive specialist whose tiny baseline inflates his
+    # "edge" — that bug made the attack card duplicate the defender card.
     best = None
     for attacker in my_roster:
         try:
@@ -968,7 +981,7 @@ def find_attack_mismatch(my_team, opponent, season):
                     "kind": "observed", "ppp": round(ppp, 2),
                     "attacker_avg": round(avg, 2), "edge": round(edge, 2),
                     "poss": round(float(r["PARTIAL_POSS"]), 1)}
-            if best is None or cand["edge"] > best["edge"]:
+            if best is None or cand["ppp"] > best["ppp"]:
                 best = cand
     if best is not None:
         return best
