@@ -974,6 +974,10 @@ GLOSSARY = {
                   "More = a regular late-game presence."),
     "clutch_pts": ("Clutch PTS/G", "points per game the player scores in clutch "
                    "minutes."),
+    "clutch_vs_lg": ("vs league", "how his clutch PTS/G compares to the league "
+                     "average clutch scorer — green is above, red below."),
+    "clutch_share": ("% of his pts", "the share of the player's season points "
+                     "that come in clutch time — higher = more of a closer."),
     "clutch_fg": ("Clutch FG%", "field-goal percentage in clutch minutes."),
     "clutch_usg": ("Clutch USG%", "share of the team's clutch plays the player "
                    "finishes — how much the offence runs through him late."),
@@ -986,7 +990,8 @@ GLOSSARY_TABS = {
     "defend": ["source", "poss_guarded", "points_scored", "ppp", "fg",
                "projection", "edge", "ppg", "ts", "usg", "ortg",
                "action_types", "shot_zones", "avg_dist", "hotcold", "radar"],
-    "close": ["clutch_def", "clutch_gp", "clutch_pts", "clutch_fg", "clutch_usg"],
+    "close": ["clutch_def", "clutch_gp", "clutch_pts", "clutch_vs_lg",
+              "clutch_share", "clutch_fg", "clutch_usg"],
 }
 
 
@@ -1409,29 +1414,66 @@ with tab_attack:
 # -----------------------------------------------------------------------------
 with tab_close:
     st.subheader(f"Close — {opponent}'s clutch threats")
-    st.caption("Clutch = the last 5 minutes of a game with the score within 5 "
-               "points (the NBA's standard definition). These are the players "
-               f"{opponent} feeds late — plan your final-possession defence "
-               "around them.")
     try:
-        clutch = cached_clutch_stats(opponent, season)
+        clutch_data = cached_clutch_stats(opponent, season)
     except Exception as err:
-        clutch = []
+        clutch_data = {"players": [], "league_avg_pts": None}
         st.caption(f"Clutch stats unavailable: {err}")
 
-    if not clutch:
+    players = clutch_data.get("players", [])
+    league_avg = clutch_data.get("league_avg_pts")
+
+    if not players:
+        st.caption("Clutch = the last 5 minutes of a game with the score within "
+                   "5 points (the NBA's standard definition).")
         st.info(f"No clutch data for {opponent} in {season} yet.")
     else:
+        # --- 1. Takeaway header (like the other tabs) ---
+        names = [p["player"] for p in players]
+        if len(names) >= 2:
+            lead = f"{names[0]} and {names[1]}"
+        else:
+            lead = names[0]
+        render_plan("CLOSING THREATS",
+                    f"Plan your final-possession defence around {lead} — they take "
+                    f"the most clutch shots for {opponent}.", accent="defend")
+        st.caption("Clutch = the last 5 minutes of a game with the score within 5 "
+                   f"points. Ordered by total clutch scoring. League average is "
+                   f"{league_avg if league_avg is not None else '—'} clutch "
+                   "pts/game — values are read against it.")
+
+        # --- 2. Table with context (vs league + share of his scoring) ---
         rows = []
-        for c in clutch:
+        for c in players:
+            gp = "—" if c["gp"] is None else f"{c['gp']}"
+            pts = "—" if c["pts"] is None else f"{c['pts']:.1f}"
             fg = "—" if c["fg_pct"] is None else f"{c['fg_pct'] * 100:.1f}%"
             usg = "—" if c["usg"] is None else f"{c['usg'] * 100:.1f}%"
-            pts = "—" if c["pts"] is None else f"{c['pts']:.1f}"
-            gp = "—" if c["gp"] is None else f"{c['gp']}"
-            rows.append([c["player"], gp, pts, fg, usg])
-        _html_table(["Player", "Clutch GP", "Clutch PTS/G", "Clutch FG%",
-                     "Clutch USG%"], rows)
-        st.caption("Ordered by total clutch scoring (games × points). Higher "
-                   "usage = more of the offence runs through him late.")
+            share = "—" if c.get("clutch_share") is None else f"{c['clutch_share']:.1f}%"
+            # vs-league delta, colour-coded
+            if c["pts"] is not None and league_avg is not None:
+                d = c["pts"] - league_avg
+                colour = GREEN if d >= 0.5 else (RED if d <= -0.5 else GREY)
+                sign = "+" if d >= 0 else "−"
+                vs_lg = (f"<span style='color:{colour}'>{sign}{abs(d):.1f}</span>")
+            else:
+                vs_lg = "—"
+            rows.append([c["player"], gp, pts, vs_lg, share, fg, usg])
+        _html_table(["Player", "Clutch GP", "Clutch PTS/G", "vs league",
+                     "% of his pts", "Clutch FG%", "Clutch USG%"], rows)
+
+        # --- 3. Visual: clutch points per game by player ---
+        st.markdown("##### Clutch scoring (pts/game)")
+        bar_colour = TEAM_COLORS.get(opponent, "#5f86b3")
+        scored = [p for p in players if p["pts"] is not None]
+        peak = max((p["pts"] for p in scored), default=0) or 1
+        bars = ""
+        for p in scored:
+            width = max(3, p["pts"] / peak * 100)
+            bars += (f"<div class='cl-row'><span class='cl-name'>{p['player']}</span>"
+                     f"<div class='cl-track'><div class='cl-fill' style='width:"
+                     f"{width:.0f}%; background:{bar_colour}'></div></div>"
+                     f"<span class='cl-val'>{p['pts']:.1f}</span></div>")
+        st.markdown(f"<div class='cl-chart'>{bars}</div>", unsafe_allow_html=True)
 
     render_glossary("close")

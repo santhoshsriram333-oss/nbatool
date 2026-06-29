@@ -119,3 +119,20 @@ footer { visibility: hidden; }
     letter-spacing: 0.06em;
 }
 .team-strip .season { font-size: 0.92rem; color: #9aa0a6; }
+
+/* Close/Clutch tab — clutch-scoring bar chart. */
+.cl-chart { margin: 4px 0 6px 0; }
+.cl-row { display: flex; align-items: center; gap: 10px; margin: 4px 0; }
+.cl-name {
+    width: 160px; font-size: 0.84rem; color: #c4c8cd; text-align: right;
+    flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cl-track {
+    flex: 1; height: 14px; background: rgba(255, 255, 255, 0.05);
+    border-radius: 4px; overflow: hidden;
+}
+.cl-fill { height: 100%; border-radius: 4px; }
+.cl-val {
+    width: 40px; font-size: 0.8rem; color: #e3e5e8; flex-shrink: 0;
+    font-weight: 600;
+}

@@ -645,12 +645,15 @@ def _league_clutch(season, measure):
 
 
 def get_clutch_stats(team_name, season, top_n=5):
-    """A team's key clutch players (last 5 min, margin <= 5), sorted by clutch
-    points per game. Each entry: player, clutch GP, PTS/game, FG%, and usage
-    (usage from the Advanced clutch table; None if unavailable). Returns []
-    on any failure so the tab degrades gracefully.
+    """A team's key clutch players (last 5 min, margin <= 5), sorted by total
+    clutch scoring. Returns a dict:
+      {"players": [ {player, gp, pts, fg_pct, usg, clutch_share}, ... ],
+       "league_avg_pts": float}
+    where clutch_share is the % of the player's season points scored in clutch
+    time, and league_avg_pts is the typical clutch-rotation player's clutch
+    PTS/G (a benchmark to read each number against). Degrades to empty/None.
     """
-    out = []
+    out = {"players": [], "league_avg_pts": None}
     try:
         team_id = get_team_id(team_name)
     except Exception:
@@ -660,14 +663,23 @@ def get_clutch_stats(team_name, season, top_n=5):
     except Exception:
         return out
 
-    base = base[base["TEAM_ID"] == team_id]
-    if base.empty:
+    # League benchmark: average clutch PTS/G among regular clutch participants
+    # (>= 10 clutch games), so a star's clutch scoring has something to beat.
+    try:
+        regular = base[base["GP"] >= 10]
+        if not regular.empty:
+            out["league_avg_pts"] = round(float(regular["PTS"].mean()), 1)
+    except Exception:
+        pass
+
+    team_base = base[base["TEAM_ID"] == team_id]
+    if team_base.empty:
         return out
     # Drop one-off appearances so a single hot game doesn't top the list.
-    if "GP" in base.columns and (base["GP"] >= 2).any():
-        base = base[base["GP"] >= 2]
+    if "GP" in team_base.columns and (team_base["GP"] >= 2).any():
+        team_base = team_base[team_base["GP"] >= 2]
 
-    # Usage comes from the Advanced clutch table (best-effort).
+    # Usage (Advanced clutch table) and full-season scoring (for clutch share).
     usg_map = {}
     try:
         adv = _league_clutch(season, "Advanced")
@@ -676,20 +688,38 @@ def get_clutch_stats(team_name, season, top_n=5):
             usg_map = dict(zip(adv["PLAYER_ID"], adv["USG_PCT"]))
     except Exception:
         pass
+    season_pts = {}   # player_id -> (season PTS/G, season GP)
+    try:
+        scoring = get_team_player_scoring(team_name, season)
+        if {"PLAYER_ID", "PTS", "GP"}.issubset(scoring.columns):
+            season_pts = {row["PLAYER_ID"]: (float(row["PTS"]), float(row["GP"]))
+                          for _, row in scoring.iterrows()}
+    except Exception:
+        pass
 
     # Rank by total clutch scoring (games x points/game) so "who they feed late"
     # reflects volume + frequency, not a 2-game hot streak.
-    base = base.copy()
-    base["_total"] = base["PTS"] * base["GP"]
-    base = base.sort_values("_total", ascending=False).head(top_n)
-    for _, r in base.iterrows():
-        usg = usg_map.get(r["PLAYER_ID"])
-        out.append({
+    team_base = team_base.copy()
+    team_base["_total"] = team_base["PTS"] * team_base["GP"]
+    team_base = team_base.sort_values("_total", ascending=False).head(top_n)
+    for _, r in team_base.iterrows():
+        gp = int(r["GP"]) if "GP" in team_base.columns else None
+        pts = float(r["PTS"]) if "PTS" in team_base.columns else None
+        # Share of his season points that come in the clutch.
+        share = None
+        sp = season_pts.get(r["PLAYER_ID"])
+        if pts is not None and gp and sp and sp[0] > 0 and sp[1] > 0:
+            clutch_total = pts * gp
+            season_total = sp[0] * sp[1]
+            if season_total > 0:
+                share = round(clutch_total / season_total * 100, 1)
+        out["players"].append({
             "player": r["PLAYER_NAME"],
-            "gp": int(r["GP"]) if "GP" in base.columns else None,
-            "pts": float(r["PTS"]) if "PTS" in base.columns else None,
-            "fg_pct": float(r["FG_PCT"]) if "FG_PCT" in base.columns else None,
-            "usg": float(usg) if usg is not None else None,
+            "gp": gp,
+            "pts": pts,
+            "fg_pct": float(r["FG_PCT"]) if "FG_PCT" in team_base.columns else None,
+            "usg": float(usg_map.get(r["PLAYER_ID"])) if usg_map.get(r["PLAYER_ID"]) is not None else None,
+            "clutch_share": share,
         })
     return out
 
