@@ -118,6 +118,11 @@ def cached_clutch_stats(team_name, season):
     return dp.get_clutch_stats(team_name, season)
 
 
+@st.cache_data(show_spinner="Pulling clutch shot profile…")
+def cached_clutch_shot_profile(player_name, team_name, season):
+    return dp.get_clutch_shot_profile(player_name, team_name, season)
+
+
 @st.cache_data(show_spinner="Finding the matchup to hunt…")
 def cached_attack_mismatch(my_team, opponent, season, exclude_defender=None):
     exclude = {exclude_defender} if exclude_defender else None
@@ -1100,6 +1105,17 @@ TEAM_COLORS = {
     "Utah Jazz": "#002B5C", "Washington Wizards": "#E31837",
 }
 
+# Clutch shot-type bucket -> plain-language defensive read.
+CLUTCH_READ = {
+    "Drive / rim": "downhill rim",
+    "Pull-up mid": "pull-up jumper",
+    "Pull-up 3": "pull-up three",
+    "Spot-up 3": "spot-up three",
+    "Floater": "floater",
+    "Post / fade": "post / fadeaway",
+    "Mid-range": "mid-range",
+}
+
 
 def render_team_strip(my_team, opponent, season):
     """Header strip: '{My Team} vs {Opponent} · {Season}' with each team's
@@ -1712,5 +1728,39 @@ with tab_close:
                      f"{width:.0f}%; background:{bar_colour}'></div></div>"
                      f"<span class='cl-val'>{p['pts']:.1f}</span></div>")
         st.markdown(f"<div class='cl-chart'>{bars}</div>", unsafe_allow_html=True)
+
+        # --- 4. How the top clutch player scores late (shot-type mix) ---
+        top = players[0]
+        st.markdown(f"##### How {top['player']} scores late")
+        try:
+            prof = cached_clutch_shot_profile(top["player"], opponent, season)
+        except Exception as err:
+            prof = {"buckets": {}, "attempts": 0, "dominant": None, "proxy": ""}
+            st.caption(f"Clutch shot profile unavailable: {err}")
+
+        if not prof.get("buckets"):
+            n = prof.get("attempts", 0)
+            if n > 0:
+                st.caption(f"Only {n} late-game shots for {top['player']} — too "
+                           "thin to break down reliably.")
+            else:
+                st.caption(f"No clutch shot data available for {top['player']}.")
+        else:
+            phrase = CLUTCH_READ.get(prof["dominant"], prof["dominant"])
+            st.markdown(f"In the clutch, **{top['player']}** is a **{phrase}** "
+                        "threat — defend accordingly.")
+            peak2 = max(prof["buckets"].values()) or 1
+            sbars = ""
+            for i, (b, share) in enumerate(prof["buckets"].items()):
+                colour = bar_colour if i == 0 else "#5a6b7d"   # dominant highlighted
+                w = max(3, share / peak2 * 100)
+                sbars += (f"<div class='cl-row'><span class='cl-name'>{b}</span>"
+                          f"<div class='cl-track'><div class='cl-fill' style='width:"
+                          f"{w:.0f}%; background:{colour}'></div></div>"
+                          f"<span class='cl-val'>{share:.0f}%</span></div>")
+            st.markdown(f"<div class='cl-chart'>{sbars}</div>",
+                        unsafe_allow_html=True)
+            st.caption(f"Share of his late shots by type. Clutch proxy: "
+                       f"{prof['proxy']}.")
 
     render_glossary("close")

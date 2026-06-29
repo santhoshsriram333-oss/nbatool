@@ -724,6 +724,79 @@ def get_clutch_stats(team_name, season, top_n=5):
     return out
 
 
+def _classify_clutch_action(action, shot_type):
+    """Bucket a shot's ACTION_TYPE (+ 2PT/3PT) into a defensive shot-type."""
+    a = (action or "").lower()
+    is3 = "3pt" in (shot_type or "").lower()
+    if "float" in a:
+        return "Floater"
+    if any(k in a for k in ("fadeaway", "fade away", "turnaround", "hook", "post")):
+        return "Post / fade"
+    if any(k in a for k in ("layup", "dunk", "cutting", "finger roll", "reverse",
+                            "putback", "tip", "alley", "driving")):
+        return "Drive / rim"
+    if any(k in a for k in ("pullup", "pull-up", "pull up", "step back",
+                            "stepback", "running")):
+        return "Pull-up 3" if is3 else "Pull-up mid"
+    if is3:
+        return "Spot-up 3"
+    return "Mid-range"
+
+
+def get_clutch_shot_profile(player_name, team_name, season, min_attempts=8):
+    """How a player scores LATE — his shot-type mix in the clutch.
+
+    ShotChartDetail has no score-margin filter, so true clutch (last 5 min,
+    margin <= 5) can't be reproduced from shot data. We approximate it with the
+    closest available proxy — the last 5 minutes of Q4 plus all overtime — and
+    label that honestly. Returns:
+      {"buckets": {shot_type: share%}, "attempts": int, "dominant": str|None,
+       "proxy": str}
+    `attempts` is the late-shot count; if it's below `min_attempts` the buckets
+    come back empty so the caller can show a 'too thin' message rather than a
+    misleading split. Routed through cached_pull.
+    """
+    out = {"buckets": {}, "attempts": 0, "dominant": None,
+           "proxy": "last 5 min of Q4 + OT (no score-margin filter available)"}
+    try:
+        player_id = get_player_id(player_name)
+        team_id = get_team_id(team_name)
+    except Exception:
+        return out
+
+    def fetch():
+        sc = shotchartdetail.ShotChartDetail(
+            team_id=team_id, player_id=player_id, season_nullable=season,
+            season_type_all_star="Regular Season", context_measure_simple="FGA",
+            period=0, timeout=TIMEOUT)
+        df = sc.get_data_frames()[0]
+        keep = [c for c in ("PERIOD", "MINUTES_REMAINING", "ACTION_TYPE",
+                            "SHOT_TYPE", "SHOT_MADE_FLAG") if c in df.columns]
+        return df[keep].copy()
+
+    df = cached_pull(f"clutchshots_{player_id}_{team_id}_{season}", fetch)
+    if df is None or df.empty or "PERIOD" not in df.columns:
+        return out
+
+    late = df[((df["PERIOD"] == 4) & (df["MINUTES_REMAINING"] <= 5))
+              | (df["PERIOD"] >= 5)]
+    out["attempts"] = int(len(late))
+    if len(late) < min_attempts:
+        return out                         # too thin to break down honestly
+
+    counts = {}
+    for _, r in late.iterrows():
+        b = _classify_clutch_action(str(r.get("ACTION_TYPE", "")),
+                                    str(r.get("SHOT_TYPE", "")))
+        counts[b] = counts.get(b, 0) + 1
+    total = sum(counts.values())
+    buckets = {k: round(v / total * 100, 1) for k, v in counts.items()}
+    buckets = dict(sorted(buckets.items(), key=lambda kv: kv[1], reverse=True))
+    out["buckets"] = buckets
+    out["dominant"] = next(iter(buckets), None)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Player -> team mapping (so the app can tell whose defenders are whose)
 # ---------------------------------------------------------------------------
