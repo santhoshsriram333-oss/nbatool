@@ -19,7 +19,7 @@ PAIRINGS = [
     ("Milwaukee Bucks", "Indiana Pacers"),
     ("Phoenix Suns", "Los Angeles Lakers"),
 ]
-SEASONS = ["2023-24", "2024-25"]
+SEASONS = ["2025-26", "2024-25", "2023-24"]   # 2025-26 first — it's the tool's default
 
 # Thresholds for flagging artifacts.
 MIN_GP = 20        # below this = small sample
