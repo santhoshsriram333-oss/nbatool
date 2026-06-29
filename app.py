@@ -134,6 +134,16 @@ def cached_position_map(season):
     return dp.get_player_position_map(season)
 
 
+@st.cache_data(show_spinner=False)
+def cached_attacker_profile(player_name, team_name, season):
+    return dp.get_attacker_zone_profile(player_name, team_name, season)
+
+
+@st.cache_data(show_spinner=False)
+def cached_defender_zone_defense(season):
+    return dp.get_defender_zone_defense(season)
+
+
 def _default_index(names, target):
     """Index of `target` in `names`, tolerant of case/accent-ish mismatches;
     falls back to 0 so a dropdown always has a valid default."""
@@ -644,6 +654,82 @@ def force_direction_chart(shots, recommended):
     return fig
 
 
+def attack_edge_chart(profile, def_zones, attacker_name, defender_name):
+    """Diverging bar chart for the selected matchup: my attacker's shot diet
+    (share of shots at rim / short-mid / three) on the left, and the defender's
+    performance in those same zones on the right (allowed FG% vs league average,
+    where ABOVE-average allowed = the defender is exploitable). The zone where
+    the attacker's volume overlaps the defender's weakness is highlighted — that
+    is the edge the plan sentence points at."""
+    import numpy as np
+
+    zones = [("at_rim", "At rim"), ("short_mid", "Short-mid"), ("three", "Three")]
+    labels, shares, pms = [], [], []
+    for key, disp in zones:
+        labels.append(disp)
+        shares.append((profile.get(key, {}).get("share", 0.0) or 0.0) * 100)
+        pm = 0.0
+        if def_zones and key in def_zones:
+            pm = (def_zones[key].get("plusminus", 0.0) or 0.0) * 100   # pp vs avg
+        pms.append(pm)
+
+    # Edge = where his volume meets the defender's weakness (positive pm).
+    edge_scores = [(shares[i] / 100.0) * max(pms[i], 0.0) for i in range(3)]
+    edge_idx = int(np.argmax(edge_scores)) if max(edge_scores) > 0 else None
+
+    y = np.arange(3)[::-1]            # At rim on top
+    surface = "#1e2125"
+    fig, (axL, axR) = plt.subplots(
+        1, 2, sharey=True, figsize=(5.6, 2.5),
+        gridspec_kw={"wspace": 0.55})
+    fig.patch.set_facecolor(surface)
+    for a in (axL, axR):
+        a.set_facecolor(surface)
+
+    # Left — attacker shot diet (grows leftward).
+    bl = axL.barh(y, shares, height=0.62, color="#5a7fa0", zorder=3)
+    axL.invert_xaxis()
+    axL.set_xlim(max(shares + [1]) * 1.18, 0)
+    axL.set_title(f"{attacker_name.split()[-1]} shot diet (%)", fontsize=8,
+                  color="#9aa6b2")
+    for yi, s in zip(y, shares):
+        axL.text(s + max(shares) * 0.03, yi, f"{s:.0f}%", va="center", ha="right",
+                 fontsize=7.5, color="#c4c8cd")
+
+    # Right — defender vs league average (positive = exploitable green).
+    colours = ["#63b384" if p > 0.3 else ("#d18a8a" if p < -0.3 else "#9aa0a6")
+               for p in pms]
+    axR.barh(y, pms, height=0.62, color=colours, zorder=3)
+    axR.axvline(0, color="#5a6068", lw=0.8)
+    lim = max(4.0, max(abs(p) for p in pms) * 1.25)
+    axR.set_xlim(-lim, lim)
+    axR.set_title(f"{defender_name.split()[-1]} D — FG% vs avg", fontsize=8,
+                  color="#9aa6b2")
+    for yi, p in zip(y, pms):
+        off = lim * 0.05
+        axR.text(p + (off if p >= 0 else -off), yi, f"{p:+.1f}", va="center",
+                 ha="left" if p >= 0 else "right", fontsize=7.5, color="#c4c8cd")
+
+    # Highlight the edge zone (volume meets weakness): tag its label + band it.
+    disp = [labels[i] + ("  ◂ EDGE" if i == edge_idx else "") for i in range(3)]
+    axL.set_yticks(y)
+    axL.set_yticklabels(disp, fontsize=8, color="#c4c8cd")
+    for a in (axL, axR):
+        a.tick_params(colors="#7a8088", labelsize=7)
+        for s in a.spines.values():
+            s.set_color("#3a3f45")
+        a.set_xticks([])
+
+    if edge_idx is not None:
+        ey = y[edge_idx]
+        for a in (axL, axR):
+            a.axhspan(ey - 0.46, ey + 0.46, color="#63b384", alpha=0.10, zorder=0)
+        axL.get_yticklabels()[edge_idx].set_color("#74c79c")
+        axL.get_yticklabels()[edge_idx].set_fontweight("bold")
+    fig.tight_layout()
+    return fig
+
+
 def direction_breakdown(shots):
     """Volume-weighted make% and attempts per direction (left / down the middle /
     right), bucketing SHOT_ZONE_AREA. Each bucket's make% = total makes / total
@@ -772,7 +858,7 @@ def attack_takeaway(my_player, my_team, opponent, season):
     matchup he's actually faced is BELOW his average, the defender is doing a
     good job, so recommending an attack there would be backwards; instead we say
     so plainly and point to the best projected edge."""
-    out = {"sentence": None, "kind": "none"}
+    out = {"sentence": None, "kind": "none", "defender": None}
     try:
         matchups = cached_matchups(my_player, season)
         opp_abbr = cached_team_abbr(opponent)
@@ -789,6 +875,7 @@ def attack_takeaway(my_player, my_team, opponent, season):
         if avg is None or ppp >= avg:
             # A real edge: he scores at/above his own average here.
             out["kind"] = "observed"
+            out["defender"] = best["DEF_PLAYER_NAME"]
             out["sentence"] = (
                 f"Attack {best['DEF_PLAYER_NAME']} — {my_player} scored {ppp:.2f} "
                 f"pts/poss against him{_cmp_suffix(ppp, avg)}.")
@@ -810,10 +897,12 @@ def attack_takeaway(my_player, my_team, opponent, season):
                         f"he's faced (best: {best['DEF_PLAYER_NAME']}, {ppp:.2f}).")
             if p and p["score"] > 0:
                 out["kind"] = "projected"
+                out["defender"] = p["defender"]
                 out["sentence"] = (f"{head} Projected best edge: {p['defender']} "
                                    f"({p['label']}).")
             else:
                 out["kind"] = "observed"
+                out["defender"] = best["DEF_PLAYER_NAME"]
                 out["sentence"] = head
     else:
         # No head-to-head data at all — fall back to projections, but only call
@@ -821,10 +910,12 @@ def attack_takeaway(my_player, my_team, opponent, season):
         p = _top_projected_edge(my_player, my_team, opponent, season)
         if p and p["score"] > 0:
             out["kind"] = "projected"
+            out["defender"] = p["defender"]
             out["sentence"] = (f"Attack {p['defender']} — projected best edge vs "
                                f"{opponent} ({p['label']}).")
         elif p:
             out["kind"] = "projected"
+            out["defender"] = p["defender"]
             out["sentence"] = (f"No favourable matchup projected vs {opponent} — "
                                f"closest is {p['defender']} ({p['label']}).")
         else:
@@ -1499,6 +1590,25 @@ with tab_attack:
                 # --- Takeaway headline (shared logic with the Game Plan tab) ---
                 tk = attack_takeaway(my_player, my_team, opponent, season)
                 render_plan("ATTACK PLAN", tk["sentence"], accent="attack")
+
+                # Diverging chart: my attacker's shot diet vs the chosen
+                # defender's zone weakness — shows where the volume overlaps the
+                # weakness (the edge the sentence names).
+                if tk.get("defender"):
+                    try:
+                        prof = cached_attacker_profile(my_player, my_team, season)
+                        dz = cached_defender_zone_defense(season).get(tk["defender"])
+                    except Exception:
+                        prof, dz = None, None
+                    if prof and prof.get("total_shots"):
+                        ec, _ = st.columns([3, 2])   # keep it compact
+                        with ec:
+                            st.pyplot(attack_edge_chart(prof, dz, my_player,
+                                                        tk["defender"]))
+                            st.caption(f"{my_player}'s shot volume (left) vs "
+                                       f"{tk['defender']}'s zone defence (right). "
+                                       "Green = the defender allows more than "
+                                       "league average there — exploitable.")
 
                 # Defender positions, so the user can see if a matchup is
                 # positionally realistic (guard vs centre).
