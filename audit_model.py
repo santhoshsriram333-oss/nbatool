@@ -1,4 +1,5 @@
-# --- TEMPORARY read-only diagnostic — safe to delete ---
+# --- Model audit: recommendation-logic validation harness ---
+# A read-only check that does NOT modify any app code or the dashboard.
 # Runs the tool's CORE recommendation logic (no Streamlit/UI) across several
 # matchups + seasons and flags likely flaws. It mirrors what app.py does:
 #   - defender pick  == defend_takeaway()  (best observed defender, else projected)

@@ -54,3 +54,16 @@ The app **requires an internet connection** — it pulls live data from the NBA
 Stats API the first time you load each team and season. That first load for a
 given team/season may take a few moments while it fetches and caches the data;
 after that, the same selection loads instantly from the local cache.
+
+## Validation scripts (optional — not needed to run the dashboard)
+
+These standalone scripts document how the model's choices were checked. They are
+not part of the dashboard; run them the same way (`python <file>`) with the
+virtual environment activated:
+
+- `floor_check.py` — sensitivity analysis behind the 40-possession floor: it
+  re-applies different floors to cached matchup data and shows why 40 is the
+  default (below it, the "toughest defender" list is hijacked by small-sample
+  noise).
+- `audit_model.py` — stress-tests the core recommendation logic across 24
+  team/season perspectives and flags small-sample or duplicate-pick artifacts.
