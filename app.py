@@ -1,23 +1,819 @@
-# --- Matchup Advantage: Streamlit dashboard (plain, working version) ---
-# Function over looks for now — we'll style it later. This just wires the
-# data_pipeline functions up to a UI so I can actually click around the data.
+# =============================================================================
+# Matchup Advantage — merged app.py
+# LOGIC: all functions verbatim from the audited app.py (unchanged).
+# LOOK : visual shell (theme, CSS, sidebar, header, tabs, cards) from app_ui.py.
+# =============================================================================
 
 import os
 import warnings
-
-# nba_api/urllib3 throws a NotOpenSSLWarning on macOS's LibreSSL — harmless,
-# but it clutters the console, so silence it before anything imports urllib3.
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle, Arc
+from matplotlib.patches import Circle, Rectangle, Arc, RegularPolygon
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+import matplotlib as mpl
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-from nba_api.stats.static import teams
+from nba_api.stats.static import teams, players as nba_players
 
 import data_pipeline as dp
 
+
+# =============================================================================
+# PAGE CONFIG
+# =============================================================================
+st.set_page_config(
+    page_title="Matchup Advantage",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    page_icon="🏀",
+)
+
+
+# =============================================================================
+# PALETTE — NBA-authentic light theme (UI.py)
+# =============================================================================
+NBA_BLUE    = "#17408B"
+NBA_RED     = "#C9082A"
+WHITE       = "#FFFFFF"
+LIGHT_GREY  = "#F4F6F9"
+BORDER      = "#E1E5ED"
+BORDER2     = "#C8CEDB"
+CHARCOAL    = "#1A1F2E"
+TEXT        = "#1A1F2E"
+TEXT2       = "#3D4A5C"
+TEXT3       = "#7A8799"
+CARD        = "#FFFFFF"
+CARD2       = "#F4F6F9"
+SUCCESS     = "#1A7F4B"
+WARN        = "#C47A1E"
+DANGER      = "#C9082A"
+LIGHT_S     = "#E8F5EE"
+LIGHT_D     = "#FCE8E8"
+LIGHT_P     = "#E8EEF8"
+
+# Semantic aliases used by app.py takeaway logic
+GREEN = SUCCESS
+GREY  = TEXT3
+RED   = DANGER
+
+
+# =============================================================================
+# CSS — Premium NBA analytics (UI.py aesthetic, enlarged + enhanced)
+# =============================================================================
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+/* ── base reset ── */
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+.main .block-container {{
+    background: {LIGHT_GREY} !important;
+    color: {TEXT};
+    font-family: 'Inter', system-ui, sans-serif;
+}}
+.block-container {{
+    padding-top: 0 !important;
+    padding-bottom: 3rem !important;
+    max-width: 1600px;
+}}
+
+/* ── entrance animations ── */
+@keyframes fadeSlideIn {{
+    from {{ opacity: 0; transform: translateY(16px); }}
+    to   {{ opacity: 1; transform: translateY(0); }}
+}}
+@keyframes fadeIn {{
+    from {{ opacity: 0; }}
+    to   {{ opacity: 1; }}
+}}
+@keyframes slideRight {{
+    from {{ opacity: 0; transform: translateX(-14px); }}
+    to   {{ opacity: 1; transform: translateX(0); }}
+}}
+@keyframes countUp {{
+    from {{ opacity: 0; transform: scale(0.88); }}
+    to   {{ opacity: 1; transform: scale(1); }}
+}}
+
+[data-testid="stTabPanel"] > div:first-child {{
+    animation: fadeSlideIn 0.38s cubic-bezier(0.22,1,0.36,1) both;
+}}
+
+/* ── sidebar (wider) ── */
+[data-testid="stSidebar"] {{
+    background: {CHARCOAL} !important;
+    border-right: none !important;
+    min-width: 295px !important;
+    max-width: 295px !important;
+}}
+[data-testid="stSidebar"] * {{ color: rgba(255,255,255,0.88) !important; }}
+[data-testid="stSidebar"] .stSelectbox label {{
+    color: rgba(255,255,255,0.45) !important;
+    font-size: .72rem !important;
+    font-weight: 800 !important;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+}}
+div[data-baseweb="select"] > div {{
+    background: rgba(255,255,255,0.07) !important;
+    border-color: rgba(255,255,255,0.14) !important;
+    color: #fff !important;
+    border-radius: 8px !important;
+    font-size: .95rem !important;
+    transition: border-color .18s, background .18s;
+}}
+div[data-baseweb="select"] > div:hover {{
+    background: rgba(255,255,255,0.11) !important;
+    border-color: rgba(255,255,255,0.28) !important;
+}}
+div[data-baseweb="select"] svg {{ fill: rgba(255,255,255,0.45) !important; }}
+div[data-baseweb="popover"] {{ background: {CARD} !important; border-radius: 9px !important; }}
+/* dropdown option list — guarantee legible dark text on a light menu */
+div[data-baseweb="popover"], div[data-baseweb="menu"], ul[role="listbox"] {{
+    background: {CARD} !important;
+}}
+div[data-baseweb="popover"] li, div[data-baseweb="menu"] li,
+ul[role="listbox"] li, [role="option"] {{
+    color: {TEXT} !important; font-size: .92rem !important;
+    background: {CARD} !important;
+}}
+[role="option"]:hover, ul[role="listbox"] li:hover {{ background: {LIGHT_P} !important; }}
+[role="option"][aria-selected="true"] {{ background: {LIGHT_P} !important; color: {NBA_BLUE} !important; }}
+
+/* ── global typography ── */
+h1, h2, h3, h4 {{
+    color: {TEXT} !important;
+    font-weight: 900 !important;
+    letter-spacing: -.03em;
+    font-family: 'Inter', system-ui, sans-serif;
+}}
+p, li {{ font-size: 1.0rem; line-height: 1.7; }}
+
+/* ── top header ── */
+.ma-header {{
+    background: linear-gradient(135deg, {CHARCOAL} 0%, #0D1627 100%);
+    border-bottom: 3px solid {NBA_RED};
+    padding: 1.8rem 2.5rem 1.7rem;
+    margin-bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 1.75rem;
+    animation: fadeIn 0.4s ease both;
+    position: relative;
+    overflow: hidden;
+}}
+.ma-header::after {{
+    content: '';
+    position: absolute;
+    top: -60%; right: -5%;
+    width: 300px; height: 300px;
+    border: 60px solid rgba(201,8,42,0.07);
+    border-radius: 50%;
+    pointer-events: none;
+}}
+.ma-app-title {{
+    font-size: 2.4rem;
+    font-weight: 900;
+    color: {WHITE};
+    letter-spacing: -.05em;
+    line-height: 1;
+    text-transform: uppercase;
+}}
+.ma-app-title span {{ color: {NBA_RED}; }}
+.ma-app-tagline {{
+    font-size: .78rem;
+    color: rgba(255,255,255,0.42);
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    margin-top: .45rem;
+}}
+.ma-matchup-val {{
+    font-size: 1.25rem;
+    color: rgba(255,255,255,0.92);
+    font-weight: 800;
+    letter-spacing: -.02em;
+    margin-top: .25rem;
+}}
+.ma-matchup-label {{
+    font-size: .65rem;
+    color: rgba(255,255,255,0.38);
+    font-weight: 700;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+}}
+.ma-season-badge {{
+    background: {NBA_BLUE};
+    border-radius: 9px;
+    padding: .55rem 1.3rem;
+    font-size: .85rem;
+    color: {WHITE};
+    font-weight: 800;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+}}
+.ma-header-matchup {{
+    text-align: right;
+    border-right: 1px solid rgba(255,255,255,0.1);
+    padding-right: 1.75rem;
+    margin-right: .5rem;
+    flex: 1;
+}}
+
+/* ── tabs ── */
+[data-testid="stTabs"] [role="tab"] {{
+    color: {TEXT3} !important;
+    font-weight: 700 !important;
+    padding: 1.25rem 2.5rem !important;
+    border-bottom: 3px solid transparent !important;
+    transition: color .18s, border-color .18s, background .18s;
+    text-transform: uppercase;
+    font-size: .88rem !important;
+    letter-spacing: .09em !important;
+}}
+[data-testid="stTabs"] [role="tab"]:hover {{
+    color: {NBA_BLUE} !important;
+    background: {LIGHT_P} !important;
+}}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{
+    color: {NBA_BLUE} !important;
+    border-bottom-color: {NBA_RED} !important;
+    font-weight: 900 !important;
+}}
+[data-testid="stTabs"] [data-baseweb="tab-list"] {{
+    border-bottom: 1px solid {BORDER} !important;
+    background: {CARD} !important;
+    gap: 0 !important;
+    padding: 0 1.75rem !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+}}
+[data-testid="stTabPanel"] {{
+    padding-top: 2.5rem !important;
+}}
+
+/* ── section headers ── */
+.sec-header {{
+    font-size: .76rem;
+    font-weight: 900;
+    letter-spacing: .15em;
+    text-transform: uppercase;
+    color: {TEXT3};
+    padding-bottom: .85rem;
+    border-bottom: 2px solid {BORDER};
+    margin-bottom: 1.75rem;
+    margin-top: 2.75rem;
+    display: flex;
+    align-items: center;
+    gap: .8rem;
+    animation: slideRight 0.3s ease both;
+}}
+.sec-accent {{
+    width: 4px;
+    height: 18px;
+    background: {NBA_RED};
+    border-radius: 2px;
+    flex-shrink: 0;
+}}
+
+/* ── KPI cards ── */
+.stat-card {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    padding: 1.75rem 1.8rem 1.5rem;
+    height: 100%;
+    position: relative;
+    overflow: hidden;
+    transition: transform .2s, box-shadow .22s;
+    animation: countUp 0.42s cubic-bezier(0.22,1,0.36,1) both;
+}}
+.stat-card:hover {{
+    transform: translateY(-3px);
+    box-shadow: 0 10px 28px rgba(23,64,139,0.12);
+}}
+.stat-card::before {{
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 5px;
+    border-radius: 14px 14px 0 0;
+}}
+.stat-card-primary::before  {{ background: {NBA_BLUE}; }}
+.stat-card-danger::before   {{ background: {NBA_RED}; }}
+.stat-card-success::before  {{ background: {SUCCESS}; }}
+.stat-card-accent::before   {{ background: linear-gradient(90deg, {NBA_BLUE}, {NBA_RED}); }}
+.stat-label {{
+    font-size: .7rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: {TEXT3};
+    margin-bottom: .75rem;
+}}
+.stat-value {{
+    font-size: 2.2rem;
+    font-weight: 900;
+    color: {TEXT};
+    letter-spacing: -.04em;
+    line-height: 1;
+}}
+.stat-sub {{
+    font-size: .8rem;
+    color: {TEXT3};
+    margin-top: .5rem;
+    line-height: 1.5;
+    font-weight: 500;
+}}
+
+/* ── recommendation cards ── */
+.rec-card {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 15px;
+    padding: 1.9rem 2.1rem;
+    margin-bottom: 1.2rem;
+    position: relative;
+    overflow: hidden;
+    animation: fadeSlideIn 0.42s cubic-bezier(0.22,1,0.36,1) both;
+    transition: box-shadow .22s;
+}}
+.rec-card:hover {{ box-shadow: 0 10px 30px rgba(0,0,0,0.1); }}
+.rec-card-attack {{
+    border-left: 5px solid {SUCCESS};
+    background: linear-gradient(135deg, {LIGHT_S} 0%, {CARD} 55%);
+}}
+.rec-card-defend {{
+    border-left: 5px solid {NBA_BLUE};
+    background: linear-gradient(135deg, {LIGHT_P} 0%, {CARD} 55%);
+}}
+.rec-card-warn {{ border-left: 5px solid {WARN}; }}
+.rec-eyebrow {{
+    font-size: .7rem;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: .15em;
+    margin-bottom: .8rem;
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+}}
+.rec-eyebrow-attack {{ color: {SUCCESS}; }}
+.rec-eyebrow-defend {{ color: {NBA_BLUE}; }}
+.rec-eyebrow-warn   {{ color: {WARN}; }}
+.rec-dot {{
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}}
+.rec-dot-attack {{ background: {SUCCESS}; }}
+.rec-dot-defend {{ background: {NBA_BLUE}; }}
+.rec-dot-warn   {{ background: {WARN}; }}
+.rec-name {{
+    font-size: 2.2rem;
+    font-weight: 900;
+    color: {TEXT};
+    letter-spacing: -.04em;
+    margin-bottom: .5rem;
+    line-height: 1.1;
+}}
+.rec-stat {{ font-size: 1.0rem; color: {TEXT2}; line-height: 1.75; }}
+.rec-meta {{
+    font-size: .76rem;
+    color: {TEXT3};
+    margin-top: .8rem;
+    display: flex;
+    align-items: center;
+    gap: .7rem;
+    flex-wrap: wrap;
+    font-weight: 500;
+}}
+
+/* ── force directive ── */
+.force-card {{
+    background: linear-gradient(135deg, {LIGHT_P} 0%, {CARD} 60%);
+    border: 1px solid {NBA_BLUE}33;
+    border-left: 5px solid {NBA_BLUE};
+    border-radius: 15px;
+    padding: 1.5rem 1.9rem;
+    margin: 1.2rem 0;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    animation: fadeSlideIn 0.45s ease both;
+}}
+.force-icon {{
+    font-size: 1.9rem;
+    line-height: 1;
+    flex-shrink: 0;
+    width: 58px; height: 58px;
+    background: {NBA_BLUE};
+    border-radius: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+}}
+.force-title {{ font-size: 1.2rem; font-weight: 900; color: {TEXT}; margin-bottom: .28rem; letter-spacing: -.02em; }}
+.force-sub   {{ font-size: .92rem; color: {TEXT2}; line-height: 1.65; }}
+
+/* ── player identity strip ── */
+.player-strip {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 13px;
+    padding: 1.3rem 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 1.5rem;
+    animation: fadeIn 0.3s ease both;
+}}
+.player-strip-img {{
+    width: 82px; height: 62px;
+    object-fit: cover; object-position: top center;
+    border-radius: 10px;
+    border: 2px solid {BORDER};
+    flex-shrink: 0;
+    background: {CARD2};
+}}
+.player-strip-role {{
+    font-size: .68rem;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: .15em;
+    color: {NBA_RED};
+    margin-bottom: .32rem;
+}}
+.player-strip-name {{
+    font-size: 1.55rem;
+    font-weight: 900;
+    color: {TEXT};
+    letter-spacing: -.03em;
+    line-height: 1.15;
+}}
+.player-strip-team {{ font-size: .85rem; color: {TEXT3}; margin-top: .2rem; font-weight: 500; }}
+
+/* ── data tables ── */
+.ma-table-wrap {{
+    border: 1px solid {BORDER};
+    border-radius: 13px;
+    overflow: hidden;
+    overflow-x: auto;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+    animation: fadeSlideIn 0.4s ease both;
+}}
+.ma-table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .92rem;
+    min-width: 480px;
+}}
+.ma-table thead {{ position: sticky; top: 0; z-index: 2; }}
+.ma-table th {{
+    background: {CHARCOAL};
+    color: rgba(255,255,255,0.72);
+    font-size: .67rem;
+    font-weight: 800;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    padding: .95rem 1.2rem;
+    border-bottom: 2px solid rgba(255,255,255,0.08);
+    text-align: left;
+    white-space: nowrap;
+}}
+.ma-table th.rh {{ text-align: right; }}
+.ma-table td {{
+    padding: .82rem 1.2rem;
+    border-bottom: 1px solid {BORDER};
+    vertical-align: middle;
+    color: {TEXT};
+    font-size: .92rem;
+    white-space: nowrap;
+    transition: background .12s;
+}}
+.ma-table tr:nth-child(even) td {{ background: #FAFBFD; }}
+.ma-table tr:last-child td {{ border-bottom: none; }}
+.ma-table tr:hover td {{ background: {LIGHT_P} !important; }}
+.ma-table .num {{
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: {TEXT2};
+}}
+.ma-table .pname {{ font-weight: 700; color: {TEXT}; font-size: .96rem; }}
+.ma-table .ttag  {{ font-size: .82rem; color: {TEXT3}; font-weight: 600; letter-spacing: .04em; }}
+.ma-table .rank-num {{ color: {TEXT3}; font-weight: 600; font-size: .86rem; text-align: right; }}
+
+/* ── pts/poss coloring ── */
+.ppp-good {{ color: {SUCCESS}; font-weight: 800; font-size: .96rem; }}
+.ppp-ok   {{ color: {WARN};    font-weight: 800; font-size: .96rem; }}
+.ppp-bad  {{ color: {NBA_RED}; font-weight: 800; font-size: .96rem; }}
+
+/* ── verdict labels ── */
+.lab-fav   {{ color: {SUCCESS}; font-weight: 700; }}
+.lab-neu   {{ color: {TEXT3};   font-weight: 700; }}
+.lab-tough {{ color: {NBA_RED}; font-weight: 700; }}
+
+/* ── pill badges ── */
+.pill {{
+    display: inline-block; padding: 2px 10px;
+    border-radius: 999px; font-size: .68rem;
+    font-weight: 800; letter-spacing: .06em;
+}}
+.pill-actual    {{ background: rgba(23,64,139,0.12); color: {NBA_BLUE}; }}
+.pill-projected {{ background: transparent; color: {TEXT3}; border: 1px solid {BORDER2}; }}
+
+/* ── viz cards ── */
+.viz-card {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 13px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    animation: fadeIn 0.45s ease both;
+    transition: box-shadow .2s;
+}}
+.viz-card:hover {{ box-shadow: 0 8px 24px rgba(23,64,139,0.11); }}
+
+/* ── insight panel ── */
+.insight-panel {{
+    background: linear-gradient(135deg, {LIGHT_P} 0%, #EEF3FB 100%);
+    border: 1px solid {NBA_BLUE}22;
+    border-left: 4px solid {NBA_BLUE};
+    border-radius: 0 0 11px 11px;
+    padding: .95rem 1.3rem;
+    font-size: .86rem;
+    color: {TEXT2};
+    line-height: 1.7;
+}}
+.insight-label {{
+    font-size: .64rem;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: {NBA_BLUE};
+    margin-bottom: .3rem;
+}}
+
+/* ── plan / takeaway cards ── */
+.plan-card {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-left: 5px solid {NBA_BLUE};
+    border-radius: 13px;
+    padding: 1.3rem 1.75rem;
+    margin: .8rem 0 .6rem 0;
+    animation: fadeSlideIn 0.4s ease both;
+}}
+.plan-card.attack {{ border-left-color: {SUCCESS}; background: linear-gradient(135deg, {LIGHT_S} 0%, {CARD} 70%); }}
+.plan-tag {{
+    font-size: .68rem; font-weight: 900;
+    letter-spacing: .12em; text-transform: uppercase;
+    color: {TEXT3}; margin-bottom: .45rem;
+}}
+.plan-text {{ font-size: 1.05rem; color: {TEXT}; line-height: 1.45; font-weight: 600; }}
+.plan-sub  {{ font-size: .9rem; color: {TEXT2}; margin-top: .5rem; line-height: 1.55; }}
+
+/* ── game plan summary bullets ── */
+.gp-summary {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    padding: 1.6rem 2rem;
+    margin-bottom: 1.75rem;
+    animation: fadeSlideIn 0.4s ease both;
+}}
+.gp-summary-tag {{
+    font-size: .7rem; font-weight: 900;
+    letter-spacing: .15em; text-transform: uppercase;
+    color: {NBA_BLUE}; margin-bottom: 1rem;
+}}
+.gp-summary ul {{ margin: 0; padding-left: 1.4rem; }}
+.gp-summary li {{ font-size: 1.0rem; color: {TEXT2}; margin-bottom: .55rem; line-height: 1.65; }}
+
+/* ── adv chip (player card) ── */
+.adv-row {{ display: flex; gap: .65rem; flex-wrap: wrap; margin-top: .7rem; }}
+.adv-chip {{
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: .45rem .85rem;
+    text-align: center;
+    background: {CARD2};
+    min-width: 68px;
+}}
+.adv-k {{ font-size: .62rem; font-weight: 800; text-transform: uppercase; letter-spacing: .1em; color: {TEXT3}; margin-bottom: .2rem; }}
+.adv-v {{ font-size: 1.05rem; font-weight: 800; line-height: 1; }}
+.adv-r {{ font-size: .64rem; color: {TEXT3}; margin-top: .2rem; }}
+
+/* ── four factors ── */
+.ff-row {{
+    display: flex; align-items: center;
+    gap: 1rem; padding: .75rem 0;
+    border-bottom: 1px solid {BORDER};
+    font-size: .92rem;
+}}
+.ff-row:last-of-type {{ border-bottom: none; }}
+.ff-label {{ width: 145px; font-weight: 700; color: {TEXT}; flex-shrink: 0; font-size: .88rem; }}
+.ff-side {{ display: flex; align-items: center; gap: .6rem; flex: 1; min-width: 0; }}
+.ff-name {{ font-size: .78rem; font-weight: 800; color: {TEXT3}; width: 40px; flex-shrink: 0; }}
+.ff-track {{ flex: 1; height: 10px; background: {BORDER}; border-radius: 99px; overflow: hidden; min-width: 50px; }}
+.ff-fill  {{ height: 100%; border-radius: 99px; transition: width .5s ease; }}
+.ff-fill.ff-win  {{ background: {SUCCESS}; }}
+.ff-fill.ff-lose {{ background: {BORDER2}; }}
+.ff-val {{ font-size: .88rem; font-weight: 700; width: 58px; text-align: right; flex-shrink: 0; color: {TEXT}; }}
+.ff-val.win {{ color: {SUCCESS}; }}
+.ff-rank {{ font-size: .72rem; font-weight: 600; width: 60px; text-align: right; flex-shrink: 0; }}
+.ff-note {{ font-size: .76rem; color: {TEXT3}; margin-top: .75rem; font-style: italic; }}
+
+/* ── team strip (header card) ── */
+.team-strip {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    padding: 1.1rem 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 1.4rem;
+    margin-bottom: 1.75rem;
+    animation: fadeIn 0.35s ease both;
+    flex-wrap: wrap;
+}}
+.team-badge {{
+    display: flex; align-items: center;
+    gap: .75rem; padding-left: 1rem;
+}}
+.team-logo {{ width: 36px; height: 36px; object-fit: contain; }}
+.team-name {{ font-size: 1.05rem; font-weight: 800; color: {TEXT}; }}
+.vs {{ font-size: .78rem; font-weight: 900; color: {TEXT3}; letter-spacing: .08em; text-transform: uppercase; }}
+.season {{ font-size: .8rem; color: {TEXT3}; font-weight: 600; }}
+
+/* ── clutch bars ── */
+.cl-chart {{ display: flex; flex-direction: column; gap: .55rem; margin: .75rem 0; }}
+.cl-row {{ display: flex; align-items: center; gap: .75rem; }}
+.cl-name {{ font-size: .88rem; font-weight: 700; color: {TEXT}; width: 140px; flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.cl-track {{ flex: 1; height: 12px; background: {BORDER}; border-radius: 99px; overflow: hidden; }}
+.cl-fill  {{ height: 100%; border-radius: 99px; transition: width .5s ease; }}
+.cl-val   {{ font-size: .88rem; font-weight: 700; color: {TEXT2}; width: 38px; text-align: right; flex-shrink: 0; }}
+
+/* ── context note ── */
+.context-note {{
+    font-size: .82rem;
+    color: {TEXT3};
+    line-height: 1.7;
+    margin-bottom: 1rem;
+    padding: .7rem 1rem;
+    background: {CARD2};
+    border-radius: 8px;
+    border-left: 3px solid {BORDER2};
+    font-weight: 500;
+}}
+
+/* ── legend ── */
+.legend {{ font-size: .82rem; color: {TEXT3}; margin: .3rem 0 .8rem 0; }}
+
+/* ── empty state ── */
+.empty-state {{
+    padding: 5rem 2rem;
+    text-align: center;
+    color: {TEXT3};
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 15px;
+    margin-top: 1rem;
+    animation: fadeIn 0.4s ease both;
+}}
+.empty-state-icon {{ font-size: 3.2rem; margin-bottom: 1.3rem; display: block; opacity: .35; }}
+.empty-state-title {{ font-size: 1.3rem; font-weight: 800; color: {TEXT2}; margin-bottom: .55rem; }}
+
+/* ── sidebar internals ── */
+.sb-logo-row {{
+    display: flex; align-items: center;
+    gap: 1rem; padding: 1.6rem 0 1rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 1.1rem;
+}}
+.sb-app-name {{
+    font-size: 1.1rem; font-weight: 900;
+    color: {WHITE}; line-height: 1.2;
+    letter-spacing: -.02em; text-transform: uppercase;
+}}
+.sb-app-name span {{ color: {NBA_RED}; }}
+.sb-app-sub {{
+    font-size: .62rem; font-weight: 700;
+    color: rgba(255,255,255,0.35);
+    letter-spacing: .15em; text-transform: uppercase; margin-top: .2rem;
+}}
+.sb-section {{
+    font-size: .62rem; font-weight: 900;
+    text-transform: uppercase; letter-spacing: .15em;
+    color: rgba(255,255,255,0.32);
+    margin-top: 1.6rem; margin-bottom: .55rem;
+}}
+.sb-footer {{
+    font-size: .72rem; color: rgba(255,255,255,0.3);
+    line-height: 2; border-top: 1px solid rgba(255,255,255,0.07);
+    padding-top: .95rem; margin-top: 2rem;
+}}
+
+/* ── glossary ── */
+.gloss-row {{
+    display: flex; gap: 1.5rem; padding: .85rem 0;
+    border-bottom: 1px solid {BORDER}; font-size: .88rem;
+}}
+.gloss-row:last-child {{ border-bottom: none; }}
+.gloss-key {{ font-weight: 800; color: {TEXT}; flex: 0 0 190px; line-height: 1.5; }}
+.gloss-val {{ color: {TEXT2}; line-height: 1.75; }}
+
+/* ── expander ── */
+[data-testid="stExpander"] {{
+    background: {CARD} !important;
+    border: 1px solid {BORDER} !important;
+    border-radius: 13px !important;
+    margin-top: 2rem !important;
+}}
+[data-testid="stExpander"] summary {{
+    font-size: .9rem !important; font-weight: 700 !important;
+    color: {TEXT2} !important; padding: 1.1rem 1.3rem !important;
+}}
+
+/* ── gp section label ── */
+.gp-section-label {{
+    font-size: .72rem; font-weight: 900;
+    text-transform: uppercase; letter-spacing: .15em;
+    color: {TEXT3}; margin-bottom: 1rem;
+    display: flex; align-items: center; gap: .6rem;
+}}
+
+/* ── photo fallback ── */
+.photo-fallback {{
+    width: 82px; height: 62px; border-radius: 10px;
+    background: {CARD2}; border: 1px dashed {BORDER2};
+    display: flex; align-items: center; justify-content: center;
+    color: {TEXT3}; font-size: .78rem;
+}}
+
+/* ── source pills inside tables ── */
+.mt-wrap {{ overflow-x: auto; margin: 4px 0 12px 0; }}
+.mt-table {{ width: 100%; border-collapse: collapse; font-size: .92rem; }}
+.mt-table th {{
+    text-align: left; padding: .8rem 1.1rem;
+    color: rgba(255,255,255,0.72);
+    font-weight: 800; font-size: .67rem;
+    letter-spacing: .12em; text-transform: uppercase;
+    border-bottom: 2px solid rgba(255,255,255,0.08);
+    white-space: nowrap; background: {CHARCOAL};
+}}
+.mt-table td {{
+    padding: .78rem 1.1rem; color: {TEXT};
+    border-bottom: 1px solid {BORDER}; white-space: nowrap; font-size: .9rem;
+}}
+.mt-table tr:nth-child(even) td {{ background: #FAFBFD; }}
+.mt-table tr:last-child td {{ border-bottom: none; }}
+.mt-table tr:hover td {{ background: {LIGHT_P} !important; }}
+
+/* ── spinner ── */
+[data-testid="stSpinner"] {{ color: {NBA_BLUE} !important; }}
+
+/* ── button ── */
+.stButton > button {{
+    background: {NBA_BLUE} !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 9px !important;
+    font-weight: 800 !important;
+    font-size: .92rem !important;
+    padding: .7rem 1.8rem !important;
+    letter-spacing: .03em !important;
+    transition: background .18s, transform .15s, box-shadow .18s !important;
+}}
+.stButton > button:hover {{
+    background: #0f2f6a !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 16px rgba(23,64,139,0.25) !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# matplotlib chart palette (light theme)
+MPLBG = "#FFFFFF"
+MPLTX = "#1A1F2E"
+MPLDM = "#7A8799"
+MPLGR = "#E8EDF4"
+C_PRIMARY = NBA_BLUE
+C_SUCCESS = SUCCESS
+C_DANGER  = NBA_RED
+
+
+# ===== LOGIC (verbatim from app.py) =====
 
 # -----------------------------------------------------------------------------
 # Cached wrappers — every data_pipeline call goes through @st.cache_data so a
@@ -272,7 +1068,7 @@ def hot_cold_shot_chart(shots, league_avg_df):
         [league_pct[k] if (k in league_pct and not pd.isna(league_pct[k]))
          else overall_lg for k in keys], dtype=float)
 
-    surface = "#1e2125"
+    surface = "#FFFFFF"
     fig, ax = plt.subplots(figsize=(6, 5.6))
     fig.patch.set_facecolor(surface)
     ax.set_facecolor(surface)
@@ -285,7 +1081,7 @@ def hot_cold_shot_chart(shots, league_avg_df):
     hb.remove()
 
     if len(centres) == 0:
-        draw_court(ax, color="#7a8088")
+        draw_court(ax, color="#8090A8")
         ax.set_xlim(-250, 250)
         ax.set_ylim(422.5, -47.5)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect("equal")
@@ -316,7 +1112,7 @@ def hot_cold_shot_chart(shots, league_avg_df):
             continue
         if c < MIN_HEX_ATTEMPTS or np.isnan(diff[i]):
             # low sample -> small, faint grey so it recedes (still shown)
-            colour, radius, alpha = "#555a61", r_min * 0.6, 0.4
+            colour, radius, alpha = "#C8CEDB", r_min * 0.6, 0.4
         else:
             colour = cmap(norm(diff[i]))
             radius = r_min + (r_max - r_min) * np.sqrt(c / peak)
@@ -325,7 +1121,7 @@ def hot_cold_shot_chart(shots, league_avg_df):
                                     orientation=0.0, facecolor=colour,
                                     edgecolor="none", alpha=alpha, zorder=1))
 
-    draw_court(ax, color="#8a9198", lw=1.4)            # court lines on top
+    draw_court(ax, color="#7A8799", lw=1.4)            # court lines on top
     ax.set_xlim(-250, 250)
     ax.set_ylim(422.5, -47.5)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect("equal")
@@ -333,13 +1129,13 @@ def hot_cold_shot_chart(shots, league_avg_df):
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.02, ticks=[-0.12, 0, 0.12])
     cbar.ax.set_yticklabels(["cold", "avg", "hot"])
-    cbar.ax.tick_params(colors="#b7bcc2")
-    cbar.outline.set_edgecolor("#3a3f45")
+    cbar.ax.tick_params(colors="#7A8799")
+    cbar.outline.set_edgecolor("#D5DCE6")
     # Legend: low-sample swatch + a note that hex size = volume.
-    proxy = RegularPolygon((0, 0), numVertices=6, radius=1, facecolor="#555a61",
+    proxy = RegularPolygon((0, 0), numVertices=6, radius=1, facecolor="#C8CEDB",
                            edgecolor="none")
     ax.legend([proxy], [f"low sample (<{MIN_HEX_ATTEMPTS})"], loc="upper right",
-              fontsize=7, framealpha=0.2, labelcolor="#b7bcc2", handlelength=1.0)
+              fontsize=7, framealpha=0.2, labelcolor="#7A8799", handlelength=1.0)
     return fig
 
 
@@ -384,7 +1180,7 @@ def comparison_radar(star_name, star_team, defender_name, defender_team, season)
     star_vals += star_vals[:1]
     def_vals += def_vals[:1]
 
-    surface = "#1e2125"
+    surface = "#FFFFFF"
     fig, ax = plt.subplots(figsize=(5.2, 5.2), subplot_kw={"polar": True})
     fig.patch.set_facecolor(surface)
     ax.set_facecolor(surface)
@@ -395,16 +1191,16 @@ def comparison_radar(star_name, star_team, defender_name, defender_team, season)
         ax.fill(angles, vals, color=colour, alpha=0.18)
 
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels, color="#c4c8cd", fontsize=8)
+    ax.set_xticklabels(labels, color="#1A1F2E", fontsize=8)
     ax.set_yticks([25, 50, 75, 100])
-    ax.set_yticklabels(["25", "50", "75", "100"], color="#7a8088", fontsize=7)
+    ax.set_yticklabels(["25", "50", "75", "100"], color="#8090A8", fontsize=7)
     ax.set_ylim(0, 100)
-    ax.spines["polar"].set_color("#3a3f45")
-    ax.grid(color="#3a3f45", linewidth=0.6)
-    ax.set_title("League percentile (higher = better)", color="#8a9198",
+    ax.spines["polar"].set_color("#D5DCE6")
+    ax.grid(color="#D5DCE6", linewidth=0.6)
+    ax.set_title("League percentile (higher = better)", color="#7A8799",
                  fontsize=8, pad=14)
     ax.legend(loc="upper right", bbox_to_anchor=(1.25, 1.12), fontsize=8,
-              facecolor=surface, edgecolor="#3a3f45", labelcolor="#c4c8cd")
+              facecolor=surface, edgecolor="#D5DCE6", labelcolor="#1A1F2E")
     return fig
 
 
@@ -546,7 +1342,7 @@ def show_matchup_table(df, source="actual", positions=None, limit=None):
         row += [
             f"{r['Possessions guarded']:.1f}",
             f"{r['Points scored']:.0f}",
-            f"{r['Points per possession']:.2f}",
+            ppp_value(r['Points per possession']),
             f"{r['FG%'] * 100:.1f}%",
             f"{r['3PT%'] * 100:.1f}%",
         ]
@@ -621,7 +1417,7 @@ def force_direction_chart(shots, recommended):
         return None
     rec_idx = keys.index(recommended) if recommended in keys else None
 
-    surface = "#1e2125"
+    surface = "#FFFFFF"
     fig, ax = plt.subplots(figsize=(4.3, 2.4))
     fig.patch.set_facecolor(surface)
     ax.set_facecolor(surface)
@@ -631,30 +1427,30 @@ def force_direction_chart(shots, recommended):
     w = 0.38
     # Make% bars on the left axis; the recommended (coldest) side is highlighted
     # red, the others muted, so the chart confirms the text tip at a glance.
-    make_colours = ["#d18a8a" if i == rec_idx else "#5a6b7d" for i in range(n)]
+    make_colours = ["#d18a8a" if i == rec_idx else "#8090A8" for i in range(n)]
     ax.bar(x - w / 2, makes, w, color=make_colours, zorder=3)
     # Volume (attempts) bars on the right axis, muted blue.
-    ax2.bar(x + w / 2, vols, w, color="#3f5e74", zorder=3)
+    ax2.bar(x + w / 2, vols, w, color="#5A7FA0", zorder=3)
 
     ax.set_ylim(0, max(100, max(makes) * 1.1))
     ax2.set_ylim(0, max(vols) * 1.25 if vols else 1)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, color="#c4c8cd", fontsize=8)
+    ax.set_xticklabels(labels, color="#1A1F2E", fontsize=8)
     if rec_idx is not None:
-        ax.get_xticklabels()[rec_idx].set_color("#e0a3a3")
+        ax.get_xticklabels()[rec_idx].set_color("#C9082A")
         ax.get_xticklabels()[rec_idx].set_fontweight("bold")
         ax.annotate("force here", xy=(rec_idx, 0), xytext=(rec_idx, -18),
                     textcoords="data", ha="center", fontsize=7.5,
                     color="#d18a8a", annotation_clip=False)
 
-    ax.set_ylabel("Make %", color="#9aa6b2", fontsize=8)
-    ax2.set_ylabel("Attempts", color="#7fa0b8", fontsize=8)
+    ax.set_ylabel("Make %", color="#7A8799", fontsize=8)
+    ax2.set_ylabel("Attempts", color="#3D4A5C", fontsize=8)
     for a in (ax, ax2):
-        a.tick_params(colors="#7a8088", labelsize=7)
+        a.tick_params(colors="#8090A8", labelsize=7)
         for s in a.spines.values():
-            s.set_color("#3a3f45")
+            s.set_color("#D5DCE6")
     ax.set_axisbelow(True)
-    ax.grid(axis="y", color="#2c3036", linewidth=0.6)
+    ax.grid(axis="y", color="#E8EDF4", linewidth=0.6)
     fig.tight_layout()
     return fig
 
@@ -683,7 +1479,7 @@ def attack_edge_chart(profile, def_zones, attacker_name, defender_name):
     edge_idx = int(np.argmax(edge_scores)) if max(edge_scores) > 0 else None
 
     y = np.arange(3)[::-1]            # At rim on top
-    surface = "#1e2125"
+    surface = "#FFFFFF"
     fig, (axL, axR) = plt.subplots(
         1, 2, sharey=True, figsize=(5.6, 2.5),
         gridspec_kw={"wspace": 0.55})
@@ -696,10 +1492,10 @@ def attack_edge_chart(profile, def_zones, attacker_name, defender_name):
     axL.invert_xaxis()
     axL.set_xlim(max(shares + [1]) * 1.18, 0)
     axL.set_title(f"{attacker_name.split()[-1]} shot diet (%)", fontsize=8,
-                  color="#9aa6b2")
+                  color="#7A8799")
     for yi, s in zip(y, shares):
         axL.text(s + max(shares) * 0.03, yi, f"{s:.0f}%", va="center", ha="right",
-                 fontsize=7.5, color="#c4c8cd")
+                 fontsize=7.5, color="#1A1F2E")
 
     # Right — defender vs league average (positive = exploitable green).
     colours = ["#63b384" if p > 0.3 else ("#d18a8a" if p < -0.3 else "#9aa0a6")
@@ -709,20 +1505,20 @@ def attack_edge_chart(profile, def_zones, attacker_name, defender_name):
     lim = max(4.0, max(abs(p) for p in pms) * 1.25)
     axR.set_xlim(-lim, lim)
     axR.set_title(f"{defender_name.split()[-1]} D — FG% vs avg", fontsize=8,
-                  color="#9aa6b2")
+                  color="#7A8799")
     for yi, p in zip(y, pms):
         off = lim * 0.05
         axR.text(p + (off if p >= 0 else -off), yi, f"{p:+.1f}", va="center",
-                 ha="left" if p >= 0 else "right", fontsize=7.5, color="#c4c8cd")
+                 ha="left" if p >= 0 else "right", fontsize=7.5, color="#1A1F2E")
 
     # Highlight the edge zone (volume meets weakness): tag its label + band it.
     disp = [labels[i] + ("  ◂ EDGE" if i == edge_idx else "") for i in range(3)]
     axL.set_yticks(y)
-    axL.set_yticklabels(disp, fontsize=8, color="#c4c8cd")
+    axL.set_yticklabels(disp, fontsize=8, color="#1A1F2E")
     for a in (axL, axR):
-        a.tick_params(colors="#7a8088", labelsize=7)
+        a.tick_params(colors="#8090A8", labelsize=7)
         for s in a.spines.values():
-            s.set_color("#3a3f45")
+            s.set_color("#D5DCE6")
         a.set_xticks([])
 
     if edge_idx is not None:
@@ -940,7 +1736,7 @@ def render_plan(tag, sentence, accent="defend", sub=None):
         unsafe_allow_html=True)
 
 
-GREEN, GREY, RED = "#63b384", "#9aa0a6", "#d18a8a"
+GREEN, GREY, RED = SUCCESS, TEXT3, DANGER
 
 
 def rank_cue(rank, total):
@@ -1289,43 +2085,223 @@ def render_player_card(player_name, team_name, season):
 # -----------------------------------------------------------------------------
 # Page
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Matchup Advantage", layout="wide")
-st.markdown(TABLE_CSS, unsafe_allow_html=True)
 
 
-def load_css(filename):
-    """Inject an external stylesheet if present (graceful if it's missing)."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+# ===== VISUAL HELPERS (from app_ui.py) =====
+ACCENT_BAR = '<span class="sec-accent"></span>'
+
+
+def player_photo_url(player_name: str) -> str:
     try:
-        with open(path) as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+        matches = nba_players.find_players_by_full_name(player_name)
+        if matches:
+            pid = matches[0]["id"]
+            return f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
     except Exception:
         pass
+    return ""
 
 
-load_css("style.css")
-st.title("Matchup Advantage — NBA Opponent Scouting")
+def team_logo_url(team_name: str) -> str:
+    try:
+        tid = dp.get_team_id(team_name)
+        return f"https://cdn.nba.com/logos/nba/{tid}/global/L/logo.svg"
+    except Exception:
+        return ""
 
+
+def sec(text):
+    st.markdown(f'<div class="sec-header">{ACCENT_BAR}{text}</div>', unsafe_allow_html=True)
+
+
+def ppp_value(v):
+    cls = "ppp-good" if v <= 0.80 else ("ppp-ok" if v <= 1.00 else "ppp-bad")
+    return f'<span class="{cls}">{v:.2f}</span>'
+
+
+def confidence_label(poss):
+    if poss >= 80: return "High", SUCCESS
+    if poss >= 50: return "Medium", WARN
+    return "Low", DANGER
+
+
+def player_strip(name, role, team_name=""):
+    url = player_photo_url(name)
+    img = f'<img src="{url}" class="player-strip-img" onerror="this.style.display=\'none\'">'
+    st.markdown(f"""<div class="player-strip">
+        {img}
+        <div>
+            <div class="player-strip-role">{role}</div>
+            <div class="player-strip-name">{name}</div>
+            <div class="player-strip-team">{team_name}</div>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+
+def _fig(w=8, h=5):
+    fig, ax = plt.subplots(figsize=(w, h))
+    fig.patch.set_facecolor(MPLBG)
+    ax.set_facecolor(MPLBG)
+    for sp in ax.spines.values():
+        sp.set_edgecolor(MPLGR)
+    ax.tick_params(colors=MPLDM, labelsize=10)
+    return fig, ax
+
+
+def _wrap_fig(fig, insight_text=None):
+    if insight_text:
+        st.markdown('<div class="viz-card">', unsafe_allow_html=True)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        st.markdown(
+            f'<div class="insight-panel"><div class="insight-label">Coaching Insight</div>{insight_text}</div>',
+            unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="viz-card">', unsafe_allow_html=True)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+def fig_shot_donut(action_dict):
+    if not action_dict:
+        return None
+    labels  = [k[:30] for k in action_dict.keys()]
+    vals    = list(action_dict.values())
+    palette = [NBA_BLUE, NBA_RED, SUCCESS, WARN, "#7C3AED", "#0891B2", "#D97706", "#4B5563"][:len(labels)]
+    fig, ax = plt.subplots(figsize=(7, 6))
+    fig.patch.set_facecolor(MPLBG); ax.set_facecolor(MPLBG)
+    wedges, _, autos = ax.pie(
+        vals, colors=palette, autopct="%1.0f%%", pctdistance=0.78,
+        wedgeprops={"width": 0.52, "edgecolor": MPLBG, "linewidth": 3}, startangle=90)
+    for at in autos:
+        at.set_color("#fff"); at.set_fontsize(9); at.set_fontweight("bold")
+    ax.legend(wedges, labels, loc="lower center", ncol=2, fontsize=9,
+              frameon=False, labelcolor=MPLTX, bbox_to_anchor=(0.5, -0.28))
+    ax.set_title("Shot Type Mix", color=MPLTX, fontsize=12.5, fontweight="bold", pad=10)
+    fig.tight_layout(pad=1.8)
+    return fig
+
+
+def fig_court_side(make_by_area):
+    if not make_by_area:
+        return None
+    buckets = {"Left": [], "Centre": [], "Right": []}
+    for zone, pct in make_by_area.items():
+        if "Back Court" in zone: continue
+        if "Left"  in zone: buckets["Left"].append(pct)
+        elif "Right" in zone: buckets["Right"].append(pct)
+        else: buckets["Centre"].append(pct)
+    avgs    = {k: (sum(v) / len(v) if v else 0) for k, v in buckets.items()}
+    colours = [C_SUCCESS if v >= 50 else (WARN if v >= 38 else C_DANGER) for v in avgs.values()]
+    fig, ax = _fig(w=6, h=4.5)
+    bars = ax.bar(list(avgs.keys()), list(avgs.values()), color=colours, width=0.55, edgecolor="none")
+    ax.set_ylim(0, 75)
+    ax.axhline(40, color=MPLDM, linewidth=1.4, linestyle="--", alpha=0.5, label="~40% avg")
+    ax.legend(fontsize=9, frameon=False, labelcolor=MPLTX)
+    ax.set_ylabel("Make %", color=MPLDM, fontsize=10)
+    ax.set_title("Make % by Court Side", color=MPLTX, fontsize=12.5, fontweight="bold", pad=12)
+    ax.tick_params(axis="x", colors=MPLTX, labelsize=12); ax.tick_params(axis="y", colors=MPLDM, labelsize=10)
+    ax.yaxis.grid(True, color=MPLGR, linewidth=0.9); ax.set_axisbelow(True)
+    for bar, v in zip(bars, avgs.values()):
+        ax.text(bar.get_x() + bar.get_width() / 2, v + 2,
+                f"{v:.1f}%", ha="center", fontsize=12, fontweight="800", color=MPLTX)
+    fig.tight_layout(pad=1.3)
+    return fig
+
+
+# ===== LAYOUT (from app_ui.py) =====
+# =============================================================================
+# SIDEBAR
+# =============================================================================
 ALL_TEAMS = team_names()
-SEASONS = ["2025-26", "2024-25", "2023-24"]
+SEASONS   = ["2025-26", "2024-25", "2023-24"]
 
-col_team, col_opp, col_season = st.columns(3)
-with col_team:
-    my_team = st.selectbox("My Team", ALL_TEAMS, index=0)
-with col_opp:
-    opponent = st.selectbox("Opponent", ALL_TEAMS, index=1)
-with col_season:
-    season = st.selectbox("Season", SEASONS, index=0)
+with st.sidebar:
+    st.markdown(f"""
+    <div class="sb-logo-row">
+        <div>
+            <div class="sb-app-name">Matchup<span> Advantage</span></div>
+            <div class="sb-app-sub">NBA Scouting Platform</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-tab_overview, tab_attack, tab_defend, tab_close = st.tabs(
-    ["Game Plan", "Attack", "Defend", "Close"])
+    st.markdown('<div class="sb-section">Your Team</div>', unsafe_allow_html=True)
+    my_team = st.selectbox("My Team", ALL_TEAMS, index=0, key="sb_my_team")
+
+    st.markdown('<div class="sb-section">Opponent</div>', unsafe_allow_html=True)
+    opponent = st.selectbox("Opponent", ALL_TEAMS, index=1 if len(ALL_TEAMS) > 1 else 0, key="sb_opponent")
+
+    st.markdown('<div class="sb-section">Season</div>', unsafe_allow_html=True)
+    season = st.selectbox("Season", SEASONS, index=0, key="sb_season")
+
+    st.markdown('<div class="sb-section">Scout (Defend)</div>', unsafe_allow_html=True)
+    try:
+        opp_names = cached_roster_names(opponent, season)
+    except Exception:
+        opp_names = []
+    star = None
+    if opp_names:
+        try:    opp_top = cached_top_scorer(opponent, season)
+        except: opp_top = None
+        star = st.selectbox("Opponent Player", opp_names, index=_default_index(opp_names, opp_top), key="sb_star")
+    else:
+        st.caption(f"No roster data — {opponent} / {season}")
+
+    st.markdown('<div class="sb-section">Attack</div>', unsafe_allow_html=True)
+    try:
+        my_names = cached_roster_names(my_team, season)
+    except Exception:
+        my_names = []
+    my_player = None
+    if my_names:
+        try:    my_top = cached_top_scorer(my_team, season)
+        except: my_top = None
+        my_player = st.selectbox("Your Player", my_names, index=_default_index(my_names, my_top), key="sb_my_player")
+    else:
+        st.caption(f"No roster data — {my_team} / {season}")
+
+    st.markdown(f"""
+    <div class="sb-footer">
+        Data: NBA Stats API &nbsp;·&nbsp; {season}<br>
+    </div>""", unsafe_allow_html=True)
 
 
-# -----------------------------------------------------------------------------
-# GAME PLAN tab — the at-a-glance front door.
-# -----------------------------------------------------------------------------
-with tab_overview:
-    st.subheader("Game Plan")
+# =============================================================================
+# PAGE HEADER
+# =============================================================================
+st.markdown(f"""
+<div class="ma-header">
+    <div>
+        <div class="ma-app-title">Matchup <span>Advantage</span></div>
+        <div class="ma-app-tagline">NBA Opponent Scouting &amp; Game-Plan Intelligence</div>
+    </div>
+    <div class="ma-header-matchup">
+        <div class="ma-matchup-label">Matchup</div>
+        <div class="ma-matchup-val">{my_team} vs {opponent}</div>
+    </div>
+    <div class="ma-season-badge">{season}</div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# =============================================================================
+# TABS
+# =============================================================================
+tab_plan, tab_attack, tab_defend, tab_close = st.tabs([
+    "Game Plan",
+    "Attack",
+    "Defend",
+    "Close",
+])
+
+
+# =============================================================================
+# TAB 1 — GAME PLAN  (app.py full logic)
+# =============================================================================
+with tab_plan:
     render_team_strip(my_team, opponent, season)
 
     try:
@@ -1337,82 +2313,65 @@ with tab_overview:
     except Exception:
         my_star = None
 
-    # Compute the takeaways once, up front — reused by the summary and the cards.
-    # Defence centres on THEIR star; offence hunts the best MATCHUP (not just our
-    # top scorer), so we find the strongest mismatch across our whole roster.
     try:
-        defend_tk = defend_takeaway(opp_star, opponent, my_team, season) \
-            if opp_star else None
+        defend_tk = defend_takeaway(opp_star, opponent, my_team, season) if opp_star else None
     except Exception:
         defend_tk = None
-    # Exclude the assigned defender from the attacker pool so the two Game Plan
-    # cards always show distinct players.
+
     _assigned = defend_tk.get("assigned") if defend_tk else None
+
     try:
         mismatch = cached_attack_mismatch(my_team, opponent, season, _assigned)
     except Exception:
         mismatch = None
 
-    # --- Game plan at a glance (auto-summary) ---
     if opp_star and my_star:
         try:
-            bullets = game_plan_bullets(my_team, opponent, my_star, opp_star,
-                                        season, defend_tk, mismatch)
+            bullets = game_plan_bullets(my_team, opponent, my_star, opp_star, season, defend_tk, mismatch)
             render_game_plan_summary(bullets)
         except Exception:
             pass
 
-    col_def, col_att = st.columns(2)
+    col_def, col_att = st.columns(2, gap="large")
 
     with col_def:
         if opp_star:
-            st.markdown(f"#### Our defensive assignment — who guards {opp_star}")
+            st.markdown(f"#### Defensive assignment — who guards {opp_star}")
         else:
-            st.markdown("#### Our defensive assignment")
+            st.markdown("#### Defensive assignment")
         if opp_star:
-            # Card shows OUR assigned defender (a my-team player), not their star.
             if defend_tk and defend_tk.get("assigned"):
                 render_player_card(defend_tk["assigned"], my_team, season)
             else:
                 st.caption(f"No defender to assign from {my_team} yet.")
             if defend_tk:
-                render_plan("DEFENSIVE PLAN", defend_tk["sentence"],
-                            accent="defend", sub=defend_tk.get("force"))
-            st.caption(f"→ Defending {opp_star}. See the Defend tab for the "
-                       "full breakdown.")
+                render_plan("DEFENSIVE PLAN", defend_tk["sentence"], accent="defend", sub=defend_tk.get("force"))
+            st.caption(f"→ Defending {opp_star}. See the Defend tab for the full breakdown.")
         else:
             st.info(f"Couldn't load {opponent}'s top scorer.")
 
     with col_att:
         if mismatch:
-            st.markdown("#### Our attacking edge — who to hunt "
-                        f"{mismatch['defender']} with")
+            st.markdown(f"#### Attacking edge — hunt {mismatch['defender']} with {mismatch['attacker']}")
         else:
-            st.markdown("#### Our attacking edge")
+            st.markdown("#### Attacking edge")
         if mismatch:
-            # Feature OUR hunter (the player with the real edge), and name the
-            # weak-link defender to attack in the plan text.
             render_player_card(mismatch["attacker"], my_team, season)
             if mismatch["kind"] == "observed":
                 sentence = (
                     f"Hunt {mismatch['defender']} with {mismatch['attacker']} — "
                     f"{mismatch['ppp']:.2f} pts/poss on him (+{mismatch['edge']:.2f} "
                     f"above his {mismatch['attacker_avg']:.2f} average) over "
-                    f"{mismatch['poss']:.0f} possessions. Get him switched onto "
-                    f"{mismatch['defender']}.")
+                    f"{mismatch['poss']:.0f} possessions.")
             else:
                 sentence = (
                     f"Hunt {mismatch['defender']} with {mismatch['attacker']} — "
-                    f"projected {mismatch['label']} matchup. Get him switched onto "
-                    f"{mismatch['defender']}.")
+                    f"projected {mismatch['label']} matchup.")
             render_plan("ATTACK PLAN", sentence, accent="attack")
             if my_star and my_star != mismatch["attacker"]:
-                st.caption(f"Engine: {my_star} still runs the offence — keep "
-                           "feeding him too.")
+                st.caption(f"Engine: {my_star} still runs the offence — keep feeding him too.")
             st.caption("→ See the Attack tab for the full breakdown.")
         elif my_star and my_star != _assigned:
-            # No clear seam in the opponent's rotation — attack through our engine
-            # (only if he isn't the player already assigned to defend).
             render_player_card(my_star, my_team, season)
             render_plan("ATTACK PLAN",
                         f"No clear matchup edge vs {opponent} — attack through "
@@ -1420,15 +2379,12 @@ with tab_overview:
                         accent="attack")
             st.caption("→ See the Attack tab for the full breakdown.")
         else:
-            st.caption(f"No distinct attacking edge vs {opponent}'s rotation yet — "
-                       "see the Attack tab for the full breakdown.")
+            st.caption(f"No distinct attacking edge vs {opponent}'s rotation yet — see the Attack tab.")
 
-    # --- Four Factors team comparison ---
-    st.markdown(f"#### Four Factors — {my_team} vs {opponent}")
-    st.caption("The four team stats that decide games. The better side of each "
-               "is highlighted; turnovers are better when lower.")
+    sec(f"Four Factors — {my_team} vs {opponent}")
+    st.markdown('<div class="context-note">The four team stats that decide games. Better side highlighted; turnovers are better when lower.</div>', unsafe_allow_html=True)
     try:
-        my_ff = cached_four_factors(my_team, season)
+        my_ff  = cached_four_factors(my_team, season)
         opp_ff = cached_four_factors(opponent, season)
         render_four_factors(my_team, opponent, my_ff, opp_ff)
     except Exception as err:
@@ -1437,290 +2393,268 @@ with tab_overview:
     render_glossary("overview")
 
 
-# -----------------------------------------------------------------------------
-# DEFEND tab — the priority. Scout the opponent's star.
-# -----------------------------------------------------------------------------
-with tab_defend:
-    st.subheader(f"Defend — scouting an {opponent} player")
-    st.caption("Pick the opponent player to scout (defaults to their top "
-               f"scorer); we'll show who on {my_team} can guard him.")
+# =============================================================================
+# TAB 2 — ATTACK  (app.py full logic + UI.py charts)
+# =============================================================================
+with tab_attack:
+    if not my_player:
+        st.markdown(
+            f'<div class="empty-state">'
+            f'<div class="empty-state-title">No Player Selected</div>'
+            f'Select your player in the sidebar to load attack data.</div>',
+            unsafe_allow_html=True)
+    else:
+        player_strip(my_player, "Your Player — Attacker", my_team)
 
-    star = roster_dropdown(opponent, season, "Opponent player to scout",
-                           key="defend_player")
-    # Live card — reflects the dropdown immediately, before the report is run.
-    if star:
-        render_player_card(star, opponent, season)
-    go = st.button("Generate scouting report", key="defend_go")
+        go_attack = st.button("Show matchup edges", key="attack_go")
 
-    if go:
-        if not star:
-            st.info("Select a player first, then click Generate.")
-        else:
+        if go_attack:
+            with st.spinner(f"Loading attack data for {my_player}…"):
+                try:
+                    matchups = cached_matchups(my_player, season)
+                    opp_abbr = cached_team_abbr(opponent)
+                    my_abbr  = cached_team_abbr(my_team)
+                except ValueError as err:
+                    st.error(f"Couldn't find that player/team: {err}")
+                    st.stop()
+                except Exception as err:
+                    st.error(f"Something went wrong pulling the data: {err}")
+                    st.stop()
+
+            vs_opp = matchups[matchups["TEAM"] == opp_abbr].sort_values("PTS_PER_POSS", ascending=False)
+            league = matchups[matchups["TEAM"] != opp_abbr].sort_values("PTS_PER_POSS", ascending=False)
+
+            tk = attack_takeaway(my_player, my_team, opponent, season)
+            render_plan("ATTACK PLAN", tk["sentence"], accent="attack")
+
+            if tk.get("defender"):
+                try:
+                    prof = cached_attacker_profile(my_player, my_team, season)
+                    dz   = cached_defender_zone_defense(season).get(tk["defender"])
+                except Exception:
+                    prof, dz = None, None
+                if prof and prof.get("total_shots"):
+                    ec, _ = st.columns([3, 2])
+                    with ec:
+                        _wrap_fig(attack_edge_chart(prof, dz, my_player, tk["defender"]),
+                                  insight_text=f"{my_player}'s shot volume (left) vs {tk['defender']}'s zone defence (right). Green = defender allows above-average FG% there — exploitable.")
+
             try:
-                summary = cached_summary(star, opponent, season)
-                shots = cached_shots(star, opponent, season)
-                matchups = cached_matchups(star, season)
-                my_abbr = cached_team_abbr(my_team)
-            except ValueError as err:
-                # Raised by get_player_id / get_team_id when a name can't be resolved.
-                st.error(f"Couldn't find that player/team: {err}. "
-                         "Check the spelling, or confirm he played for "
-                         f"{opponent} in {season}.")
+                positions = cached_position_map(season)
+            except Exception:
+                positions = {}
+
+            sec(f"vs {opponent}'s defenders")
+            source_legend("Best edges first.")
+            show_matchup_table(vs_opp, source="actual", positions=positions)
+
+            observed_names = set(vs_opp["DEF_PLAYER_NAME"])
+            try:
+                proj = cached_projected_vs_roster(my_player, my_team, opponent, season)
             except Exception as err:
-                st.error(f"Something went wrong pulling the data: {err}")
+                proj = []
+                st.caption(f"Projection unavailable: {err}")
+            proj = sorted(proj, key=lambda r: r["score"], reverse=True)
+            sec(f"Projected edges (other {opponent} defenders)")
+            st.markdown('<div class="context-note">Estimated from each player\'s season profile when they haven\'t directly faced off. Treat as a guide, not a certainty.</div>', unsafe_allow_html=True)
+            show_projected_table(proj, exclude_names=observed_names, positions=positions)
+
+            sec("League-wide comparison")
+            st.markdown(f'<div class="context-note">All defenders league-wide this season with ≥40 possessions. Top {min(10, len(league))} of {len(league)} shown.</div>', unsafe_allow_html=True)
+            show_matchup_table(league, source="actual", positions=positions, limit=10)
+
+            # Shot charts
+            try:
+                atk_shots = cached_shots(my_player, my_team, season)
+                atk_sum   = cached_summary(my_player, my_team, season)
+            except Exception:
+                atk_shots = None
+                atk_sum   = None
+
+            if atk_shots is not None and not atk_shots.empty:
+                if atk_sum:
+                    sec("Shooting Tendencies")
+                    t1, t2 = st.columns(2, gap="medium")
+                    with t1:
+                        f = fig_shot_donut(atk_sum["action_type_pct"])
+                        if f: _wrap_fig(f)
+                    with t2:
+                        f = fig_court_side(atk_sum["make_pct_by_area"])
+                        if f: _wrap_fig(f)
+
+        render_glossary("attack")
+
+
+# =============================================================================
+# TAB 3 — DEFEND  (app.py full logic + all charts)
+# =============================================================================
+with tab_defend:
+    if not star:
+        st.markdown(
+            f'<div class="empty-state">'
+            f'<div class="empty-state-title">No Scout Target Selected</div>'
+            f'Select an opponent player in the sidebar to load scouting data.</div>',
+            unsafe_allow_html=True)
+    else:
+        player_strip(star, "Scouting Target", opponent)
+        render_player_card(star, opponent, season)
+
+        go_defend = st.button("Generate scouting report", key="defend_go")
+
+        if go_defend:
+            with st.spinner(f"Scouting {star}…"):
+                try:
+                    def_mu_raw = cached_matchups(star, season)
+                    def_sum    = cached_summary(star, opponent, season)
+                    my_abbr    = cached_team_abbr(my_team)
+                    opp_abbr   = cached_team_abbr(opponent)
+                    def_shots  = cached_shots(star, opponent, season)
+                except ValueError as err:
+                    st.error(f"Couldn't find that player/team: {err}")
+                    st.stop()
+                except Exception as err:
+                    st.error(f"Something went wrong: {err}")
+                    st.stop()
+
+            roster_def = def_mu_raw[def_mu_raw["TEAM"] == my_abbr].sort_values("PTS_PER_POSS", ascending=True).copy()
+            league_def = def_mu_raw[def_mu_raw["TEAM"] != my_abbr].sort_values("PTS_PER_POSS", ascending=True).copy()
+
+            tk = defend_takeaway(star, opponent, my_team, season)
+            render_plan("DEFENSIVE PLAN", tk["sentence"], accent="defend", sub=tk.get("force"))
+
+            if tk.get("force") and not def_shots.empty:
+                area = lowest_make_area_weighted(def_shots)
+                rec  = area[0] if area else None
+                fig  = force_direction_chart(def_shots, rec)
+                if fig is not None:
+                    fc, _ = st.columns([3, 4])
+                    with fc:
+                        _wrap_fig(fig, insight_text="Make% and attempt volume by court side. Red bar = the cold zone to force him to.")
+
+            # Scouting summary
+            if def_shots.empty:
+                st.warning(f"No shot data for {star} on {opponent} in {season}.")
             else:
-                # Split defenders into "my roster" vs everyone else, toughest first.
-                roster_def = matchups[matchups["TEAM"] == my_abbr] \
-                    .sort_values("PTS_PER_POSS", ascending=True)
-                league_def = matchups[matchups["TEAM"] != my_abbr] \
-                    .sort_values("PTS_PER_POSS", ascending=True)
+                sec("Scouting Summary")
+                m1, m2 = st.columns(2)
+                m1.metric("Total shots", def_sum["total_shots"])
+                m2.metric("Avg shot distance", f'{def_sum["avg_shot_distance"]} ft')
 
-                # --- Takeaway headline (shared logic with the Game Plan tab) ---
-                tk = defend_takeaway(star, opponent, my_team, season)
-                render_plan("DEFENSIVE PLAN", tk["sentence"], accent="defend",
-                            sub=tk.get("force"))
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.markdown("**Top action types (% of shots)**")
+                    st.table({"%": _pct_dict(def_sum["action_type_pct"])})
+                with c2:
+                    st.markdown("**Make % by zone**")
+                    st.table({"Make %": _pct_dict(def_sum["make_pct_by_zone"])})
+                with c3:
+                    st.markdown("**Make % by area**")
+                    st.table({"Make %": _pct_dict(def_sum["make_pct_by_area"])})
 
-                # Small visual backing the "force him" tip — make% + volume by
-                # direction, with the recommended (coldest) side highlighted.
-                if tk.get("force") and not shots.empty:
-                    area = lowest_make_area_weighted(shots)
-                    rec = area[0] if area else None
-                    fig = force_direction_chart(shots, rec)
-                    if fig is not None:
-                        fc, _ = st.columns([3, 4])   # keep it small
-                        with fc:
-                            st.pyplot(fig)
-
-                # --- Scouting summary + shot chart ---
-                if shots.empty:
-                    st.warning(f"No shot data for {star} on {opponent} in {season}. "
-                               "Is he on this team this season?")
-                else:
-                    st.markdown("### Scouting summary")
-                    m1, m2 = st.columns(2)
-                    m1.metric("Total shots", summary["total_shots"])
-                    m2.metric("Avg shot distance", f'{summary["avg_shot_distance"]} ft')
-
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        st.markdown("**Top action types (% of shots)**")
-                        st.table({"%": _pct_dict(summary["action_type_pct"])})
-                    with c2:
-                        st.markdown("**Make % by zone**")
-                        st.table({"Make %": _pct_dict(summary["make_pct_by_zone"])})
-                    with c3:
-                        st.markdown("**Make % by area**")
-                        st.table({"Make %": _pct_dict(summary["make_pct_by_area"])})
-
-                    st.markdown("### Shot chart")
-                    st.caption("Hexbin map — hex size = shot volume (bigger = more "
-                               "attempts), colour = make% vs the league average "
-                               "there (green = hot, red = cold). Faint grey = low "
-                               "sample.")
-                    chart_col, _ = st.columns([2, 1])
-                    with chart_col:
+                sec("Shot Chart & Matchup Radar")
+                st.markdown('<div class="context-note">Left: hex size = shot volume, colour = make% vs league avg (green = hot, red = cold). Right: league percentile (0-100) for the star vs your assigned defender — further out = better.</div>', unsafe_allow_html=True)
+                sr1, sr2 = st.columns(2, gap="large")
+                with sr1:
+                    try:
+                        league_avgs = cached_league_shot_avgs(star, opponent, season)
+                        _wrap_fig(hot_cold_shot_chart(def_shots, league_avgs))
+                    except Exception:
+                        _wrap_fig(shot_chart_figure(def_shots))
+                with sr2:
+                    if tk and tk.get("assigned"):
                         try:
-                            league_avgs = cached_league_shot_avgs(star, opponent, season)
-                            st.pyplot(hot_cold_shot_chart(shots, league_avgs))
-                        except Exception:
-                            # Fall back to the plain made/missed chart if league
-                            # averages are unavailable.
-                            st.pyplot(shot_chart_figure(shots))
-
-                # --- Matchup radar: the star vs our assigned defender ---
-                if tk and tk.get("assigned"):
-                    st.markdown(f"### Matchup radar — {star} vs {tk['assigned']}")
-                    st.caption("Each axis is a league percentile (0–100) for that "
-                               "metric; further out = better. Defensive rating is "
-                               "ranked so a strong defender scores high.")
-                    radar_col, _ = st.columns([2, 1])
-                    with radar_col:
-                        try:
-                            st.pyplot(comparison_radar(star, opponent,
-                                                       tk["assigned"], my_team, season))
+                            _wrap_fig(comparison_radar(star, opponent, tk["assigned"], my_team, season))
                         except Exception as err:
                             st.caption(f"Radar unavailable: {err}")
+                    else:
+                        st.caption("No assigned defender to compare.")
 
-                # --- Who to assign: my roster first, then league context ---
-                st.markdown(f"### From your roster ({my_team})")
-                source_legend("Toughest matchups first.")
-                show_matchup_table(roster_def, source="actual")
+                sec("Shooting Tendencies")
+                t1, t2 = st.columns(2, gap="medium")
+                with t1:
+                    f = fig_shot_donut(def_sum["action_type_pct"])
+                    if f: _wrap_fig(f)
+                with t2:
+                    f = fig_court_side(def_sum["make_pct_by_area"])
+                    if f: _wrap_fig(f)
 
-                # Projected supplement — fills the gap for roster players who
-                # haven't logged enough head-to-head possessions vs this star.
-                observed_names = set(roster_def["DEF_PLAYER_NAME"])
-                try:
-                    projected = cached_best_defenders_projected(
-                        star, opponent, my_team, season)
-                except Exception as err:
-                    projected = []
-                    st.caption(f"Projection unavailable: {err}")
-                st.markdown("#### Projected matchups "
-                            "(roster players he hasn't faced enough)")
-                st.caption("Projected matchups estimate the battle from each "
-                           "player's season profile when they haven't directly "
-                           "faced off. Treat as a guide, not a certainty.")
-                show_projected_table(projected, exclude_names=observed_names,
-                                     reason_key="reason_defend")
+            # My roster
+            sec(f"Who Can Guard {star} — Your Roster ({my_team})")
+            source_legend("Toughest matchups first.")
+            show_matchup_table(roster_def, source="actual")
 
-                st.markdown("### League-wide (for context)")
-                st.caption("Everyone else who guarded him, toughest first.")
-                show_matchup_table(league_def, source="actual")
-
-    render_glossary("defend")
-
-
-# -----------------------------------------------------------------------------
-# ATTACK tab — find my player's best matchup edges.
-# -----------------------------------------------------------------------------
-with tab_attack:
-    st.subheader(f"Attack — {my_team} edges vs {opponent}")
-    st.caption("Pick one of my players (defaults to our top scorer); we'll rank "
-               f"the matchups he scored best against, {opponent} first.")
-
-    my_player = roster_dropdown(my_team, season, "My player", key="attack_player")
-    # Live card — reflects the dropdown immediately, before the edges are run.
-    if my_player:
-        render_player_card(my_player, my_team, season)
-    go_attack = st.button("Show matchup edges", key="attack_go")
-
-    if go_attack:
-        if not my_player:
-            st.info("Select a player first, then click the button.")
-        else:
+            observed_names = set(roster_def["DEF_PLAYER_NAME"])
             try:
-                matchups = cached_matchups(my_player, season)
-                opp_abbr = cached_team_abbr(opponent)
-            except ValueError as err:
-                st.error(f"Couldn't find that player/team: {err}. Check the spelling.")
+                projected = cached_best_defenders_projected(star, opponent, my_team, season)
             except Exception as err:
-                st.error(f"Something went wrong pulling the data: {err}")
-            else:
-                # Best edges first; opponent's defenders split out from the rest.
-                # (Filtering/sorting works even if matchups is empty.)
-                vs_opp = matchups[matchups["TEAM"] == opp_abbr] \
-                    .sort_values("PTS_PER_POSS", ascending=False)
-                league = matchups[matchups["TEAM"] != opp_abbr] \
-                    .sort_values("PTS_PER_POSS", ascending=False)
+                projected = []
+                st.caption(f"Projection unavailable: {err}")
+            sec("Projected matchups (roster players he hasn't faced enough)")
+            st.markdown('<div class="context-note">Estimated from season profiles. Treat as a guide, not a certainty.</div>', unsafe_allow_html=True)
+            show_projected_table(projected, exclude_names=observed_names, reason_key="reason_defend")
 
-                # --- Takeaway headline (shared logic with the Game Plan tab) ---
-                tk = attack_takeaway(my_player, my_team, opponent, season)
-                render_plan("ATTACK PLAN", tk["sentence"], accent="attack")
+            sec("League-wide (for context)")
+            st.markdown('<div class="context-note">Everyone else who guarded him, toughest first.</div>', unsafe_allow_html=True)
+            show_matchup_table(league_def, source="actual")
 
-                # Diverging chart: my attacker's shot diet vs the chosen
-                # defender's zone weakness — shows where the volume overlaps the
-                # weakness (the edge the sentence names).
-                if tk.get("defender"):
-                    try:
-                        prof = cached_attacker_profile(my_player, my_team, season)
-                        dz = cached_defender_zone_defense(season).get(tk["defender"])
-                    except Exception:
-                        prof, dz = None, None
-                    if prof and prof.get("total_shots"):
-                        ec, _ = st.columns([3, 2])   # keep it compact
-                        with ec:
-                            st.pyplot(attack_edge_chart(prof, dz, my_player,
-                                                        tk["defender"]))
-                            st.caption(f"{my_player}'s shot volume (left) vs "
-                                       f"{tk['defender']}'s zone defence (right). "
-                                       "Green = the defender allows more than "
-                                       "league average there — exploitable.")
-
-                # Defender positions, so the user can see if a matchup is
-                # positionally realistic (guard vs centre).
-                try:
-                    positions = cached_position_map(season)
-                except Exception:
-                    positions = {}
-
-                # --- Observed matchups vs the opponent ---
-                st.markdown(f"### vs {opponent}'s defenders")
-                source_legend("Best edges first.")
-                show_matchup_table(vs_opp, source="actual", positions=positions)
-
-                # --- Projected edges vs opponent defenders he hasn't faced enough ---
-                observed_names = set(vs_opp["DEF_PLAYER_NAME"])
-                try:
-                    proj = cached_projected_vs_roster(my_player, my_team,
-                                                      opponent, season)
-                except Exception as err:
-                    proj = []
-                    st.caption(f"_Projection unavailable: {err}_")
-                proj = sorted(proj, key=lambda r: r["score"], reverse=True)  # favourable first
-                st.markdown(f"#### Projected edges (other {opponent} defenders)")
-                st.caption("Projected matchups estimate the battle from each "
-                           "player's season profile when they haven't directly "
-                           "faced off. Treat as a guide, not a certainty.")
-                show_projected_table(proj, exclude_names=observed_names,
-                                     positions=positions)
-
-                st.markdown("### League-wide (for context)")
-                st.caption("Top 10 by edge; expand to see the rest.")
-                show_matchup_table(league, source="actual", positions=positions,
-                                   limit=10)
-
-    render_glossary("attack")
+        render_glossary("defend")
 
 
-# -----------------------------------------------------------------------------
-# CLOSE tab — placeholder (no metrics shown, so no glossary).
-# -----------------------------------------------------------------------------
+# =============================================================================
+# TAB 4 — CLOSE  (full app.py clutch logic + UI.py styling)
+# =============================================================================
 with tab_close:
-    st.subheader(f"Close — {opponent}'s clutch threats")
+    st.markdown(f"#### {opponent}'s clutch threats")
+
     try:
         clutch_data = cached_clutch_stats(opponent, season)
     except Exception as err:
         clutch_data = {"players": [], "league_avg_pts": None}
         st.caption(f"Clutch stats unavailable: {err}")
 
-    players = clutch_data.get("players", [])
+    players    = clutch_data.get("players", [])
     league_avg = clutch_data.get("league_avg_pts")
 
     if not players:
-        st.caption("Clutch = the last 5 minutes of a game with the score within "
-                   "5 points (the NBA's standard definition).")
+        st.markdown('<div class="context-note">Clutch = the last 5 minutes of a game with the score within 5 points (the NBA\'s standard definition).</div>', unsafe_allow_html=True)
         st.info(f"No clutch data for {opponent} in {season} yet.")
     else:
-        # --- 1. Takeaway header (like the other tabs) ---
         names = [p["player"] for p in players]
-        if len(names) >= 2:
-            lead = f"{names[0]} and {names[1]}"
-        else:
-            lead = names[0]
+        lead  = f"{names[0]} and {names[1]}" if len(names) >= 2 else names[0]
         render_plan("CLOSING THREATS",
                     f"Plan your final-possession defence around {lead} — they take "
-                    f"the most clutch shots for {opponent}.", accent="defend")
-        st.caption("Clutch = the last 5 minutes of a game with the score within 5 "
-                   f"points. Ordered by total clutch scoring. League average is "
-                   f"{league_avg if league_avg is not None else '—'} clutch "
-                   "pts/game — values are read against it.")
+                    f"the most clutch shots for {opponent}.",
+                    accent="defend")
+        st.markdown(
+            f'<div class="context-note">Clutch = the last 5 minutes of a game within 5 points. '
+            f'Ordered by total clutch scoring. League average: '
+            f'{league_avg if league_avg is not None else "—"} clutch pts/game.</div>',
+            unsafe_allow_html=True)
 
-        # --- 2. Table with context (vs league + share of his scoring) ---
+        # Table
         rows = []
         for c in players:
-            gp = "—" if c["gp"] is None else f"{c['gp']}"
-            pts = "—" if c["pts"] is None else f"{c['pts']:.1f}"
-            fg = "—" if c["fg_pct"] is None else f"{c['fg_pct'] * 100:.1f}%"
-            usg = "—" if c["usg"] is None else f"{c['usg'] * 100:.1f}%"
+            gp    = "—" if c["gp"]    is None else f"{c['gp']}"
+            pts   = "—" if c["pts"]   is None else f"{c['pts']:.1f}"
+            fg    = "—" if c["fg_pct"] is None else f"{c['fg_pct'] * 100:.1f}%"
+            usg   = "—" if c["usg"]   is None else f"{c['usg'] * 100:.1f}%"
             share = "—" if c.get("clutch_share") is None else f"{c['clutch_share']:.1f}%"
-            # vs-league delta, colour-coded
             if c["pts"] is not None and league_avg is not None:
-                d = c["pts"] - league_avg
-                colour = GREEN if d >= 0.5 else (RED if d <= -0.5 else GREY)
-                sign = "+" if d >= 0 else "−"
-                vs_lg = (f"<span style='color:{colour}'>{sign}{abs(d):.1f}</span>")
+                d      = c["pts"] - league_avg
+                colour = SUCCESS if d >= 0.5 else (DANGER if d <= -0.5 else TEXT3)
+                sign   = "+" if d >= 0 else "−"
+                vs_lg  = f"<span style='color:{colour}'>{sign}{abs(d):.1f}</span>"
             else:
                 vs_lg = "—"
             rows.append([c["player"], gp, pts, vs_lg, share, fg, usg])
-        _html_table(["Player", "Clutch GP", "Clutch PTS/G", "vs league",
-                     "% of his pts", "Clutch FG%", "Clutch USG%"], rows)
+        _html_table(["Player", "Clutch GP", "Clutch PTS/G", "vs league", "% of his pts", "Clutch FG%", "Clutch USG%"], rows)
 
-        # --- 3. Visual: clutch points per game by player ---
-        st.markdown("##### Clutch scoring (pts/game)")
-        bar_colour = TEAM_COLORS.get(opponent, "#5f86b3")
+        # Clutch scoring bar chart
+        sec("Clutch scoring (pts / game)")
+        bar_colour = TEAM_COLORS.get(opponent, NBA_BLUE)
         scored = [p for p in players if p["pts"] is not None]
-        peak = max((p["pts"] for p in scored), default=0) or 1
-        bars = ""
+        peak   = max((p["pts"] for p in scored), default=0) or 1
+        bars   = ""
         for p in scored:
             width = max(3, p["pts"] / peak * 100)
             bars += (f"<div class='cl-row'><span class='cl-name'>{p['player']}</span>"
@@ -1729,9 +2663,9 @@ with tab_close:
                      f"<span class='cl-val'>{p['pts']:.1f}</span></div>")
         st.markdown(f"<div class='cl-chart'>{bars}</div>", unsafe_allow_html=True)
 
-        # --- 4. How the top clutch player scores late (shot-type mix) ---
+        # Clutch shot profile for top player
         top = players[0]
-        st.markdown(f"##### How {top['player']} scores late")
+        sec(f"How {top['player']} scores late")
         try:
             prof = cached_clutch_shot_profile(top["player"], opponent, season)
         except Exception as err:
@@ -1741,26 +2675,24 @@ with tab_close:
         if not prof.get("buckets"):
             n = prof.get("attempts", 0)
             if n > 0:
-                st.caption(f"Only {n} late-game shots for {top['player']} — too "
-                           "thin to break down reliably.")
+                st.caption(f"Only {n} late-game shots for {top['player']} — too thin to break down.")
             else:
                 st.caption(f"No clutch shot data available for {top['player']}.")
         else:
             phrase = CLUTCH_READ.get(prof["dominant"], prof["dominant"])
             st.markdown(f"In the clutch, **{top['player']}** is a **{phrase}** "
                         "threat — defend accordingly.")
-            peak2 = max(prof["buckets"].values()) or 1
-            sbars = ""
+            peak2  = max(prof["buckets"].values()) or 1
+            sbars  = ""
             for i, (b, share) in enumerate(prof["buckets"].items()):
-                colour = bar_colour if i == 0 else "#5a6b7d"   # dominant highlighted
-                w = max(3, share / peak2 * 100)
+                colour = bar_colour if i == 0 else "#8090A8"
+                w      = max(3, share / peak2 * 100)
                 sbars += (f"<div class='cl-row'><span class='cl-name'>{b}</span>"
                           f"<div class='cl-track'><div class='cl-fill' style='width:"
                           f"{w:.0f}%; background:{colour}'></div></div>"
                           f"<span class='cl-val'>{share:.0f}%</span></div>")
-            st.markdown(f"<div class='cl-chart'>{sbars}</div>",
-                        unsafe_allow_html=True)
-            st.caption(f"Share of his late shots by type. Clutch proxy: "
-                       f"{prof['proxy']}.")
+            st.markdown(f"<div class='cl-chart'>{sbars}</div>", unsafe_allow_html=True)
+            st.caption(f"Share of his late shots by type. Clutch proxy: {prof['proxy']}.")
 
     render_glossary("close")
+

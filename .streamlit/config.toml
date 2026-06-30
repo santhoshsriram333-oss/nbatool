@@ -1,12 +1,12 @@
 [theme]
-# Clean, professional dark theme — dark-grey surfaces, off-white text, one
-# restrained muted-blue accent. Deliberately not pure black/white or bright
-# primary colours.
-base = "dark"
-primaryColor = "#5f86b3"
-backgroundColor = "#15171a"
-secondaryBackgroundColor = "#1e2125"
-textColor = "#e3e5e8"
+# Light theme matching the app_ui shell — light-grey page, white surfaces,
+# NBA-blue accent, dark off-black text. Keeps native widgets (tables, metrics,
+# dropdown menus) legible and consistent with the injected CSS.
+base = "light"
+primaryColor = "#17408B"
+backgroundColor = "#F4F6F9"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1A1F2E"
 font = "sans serif"
 
 [client]
