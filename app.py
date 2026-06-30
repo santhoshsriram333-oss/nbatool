@@ -5,6 +5,7 @@
 # =============================================================================
 
 import os
+import re as _re
 import warnings
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
@@ -800,6 +801,48 @@ p, li {{ font-size: 1.0rem; line-height: 1.7; }}
     transform: translateY(-1px) !important;
     box-shadow: 0 6px 16px rgba(23,64,139,0.25) !important;
 }}
+
+/* ── ASK (chat) tab ── */
+.chat-intro {{
+    background: linear-gradient(135deg, {LIGHT_P} 0%, {CARD} 65%);
+    border: 1px solid {NBA_BLUE}22;
+    border-left: 4px solid {NBA_BLUE};
+    border-radius: 14px;
+    padding: 1.5rem 1.85rem;
+    margin-bottom: 1.5rem;
+    animation: fadeSlideIn 0.4s ease both;
+}}
+.chat-intro-title {{
+    font-size: 1.15rem; font-weight: 900; color: {TEXT};
+    margin-bottom: .5rem; letter-spacing: -.02em;
+}}
+.chat-intro-body {{ font-size: .92rem; color: {TEXT2}; line-height: 1.7; }}
+.bot-bubble {{ font-size: .98rem; color: {TEXT}; line-height: 1.75; }}
+.bot-bubble b {{ color: {NBA_BLUE}; }}
+.bot-meta {{ font-size: .72rem; color: {TEXT3}; margin-top: .5rem; font-style: italic; }}
+
+/* ── HELP tab ── */
+.help-search-note {{ font-size: .85rem; color: {TEXT3}; margin: -0.5rem 0 1.2rem 0; }}
+.faq-cat-badge {{
+    display: inline-block; background: {LIGHT_P}; color: {NBA_BLUE};
+    font-size: .64rem; font-weight: 900; letter-spacing: .1em;
+    text-transform: uppercase; padding: .25rem .7rem; border-radius: 999px;
+    margin-bottom: .5rem;
+}}
+.help-step-card {{
+    background: {CARD}; border: 1px solid {BORDER};
+    border-left: 4px solid {NBA_BLUE}; border-radius: 12px;
+    padding: 1.3rem 1.6rem; margin-bottom: .9rem;
+    display: flex; gap: 1.2rem; align-items: flex-start;
+    animation: fadeSlideIn 0.35s ease both;
+}}
+.help-step-num {{
+    width: 34px; height: 34px; background: {NBA_BLUE}; color: #fff;
+    border-radius: 9px; display: flex; align-items: center; justify-content: center;
+    font-weight: 900; font-size: 1.0rem; flex-shrink: 0;
+}}
+.help-step-title {{ font-size: 1.0rem; font-weight: 800; color: {TEXT}; margin-bottom: .3rem; }}
+.help-step-body {{ font-size: .88rem; color: {TEXT2}; line-height: 1.65; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -2288,13 +2331,499 @@ st.markdown(f"""
 
 
 # =============================================================================
+# ASK TAB — keyword-routed Q&A over the existing data pipeline (no LLM).
+# Every answer is built from real pulled stats via the same functions the other
+# tabs use, so it cannot invent numbers. Routing is hardened so a named player
+# wins over team-wide intents, and team-scoped questions honour a team named in
+# the text rather than always defaulting to the sidebar selection.
+# =============================================================================
+_INTENT_KEYWORDS = [
+    ("clutch",     ["clutch", "late game", "crunch time", "closing", "final possession"]),
+    ("force",      ["force", "weak side", "weak zone", "cold side", "cold zone"]),
+    ("defend_rec", ["who should guard", "who guards", "assign", "best defender",
+                    "defend ", "guard him", "stop him"]),
+    ("attack_rec", ["attack", "hunt", "exploit", "edge", "matchup edge", "best matchup"]),
+    ("shotchart",  ["shot chart", "shots", "shooting", "shoot", "hot zone",
+                    "cold zone", "hexbin"]),
+    ("fourfactors",["four factors", "efg", "turnover", "rebound rate", "free throw rate"]),
+    ("advstats",   ["true shooting", "ts%", "usage", "usg", "rating", "advanced stats",
+                    "advanced stat", "percentile"]),
+    ("headline",   ["ppg", "rpg", "apg", "stats for", "stat line", "averages",
+                    "how many points", "how is he playing"]),
+    ("compare",    [" vs ", " versus ", "compare"]),
+    ("roster",     ["roster", "who plays for", "who's on", "lineup"]),
+]
+
+# Team-wide intents — deprioritised when a player-specific intent also matches,
+# so "how does X shoot in the clutch" routes to the shot chart, not clutch.
+_GLOBAL_INTENTS = {"clutch", "fourfactors", "roster"}
+# Tie-break order (earlier = more specific / preferred) when hit counts tie.
+_INTENT_PRIORITY = ["compare", "force", "defend_rec", "attack_rec", "shotchart",
+                    "advstats", "headline", "clutch", "fourfactors", "roster"]
+
+
+def _norm(s):
+    return _re.sub(r"\s+", " ", s.strip().lower())
+
+
+def _find_player_in_text(text, season):
+    """Best player-name match inside free text, checking both sidebar rosters."""
+    text_low = _norm(text)
+    candidates = []
+    for tm in (my_team, opponent):
+        try:
+            candidates += cached_roster_names(tm, season)
+        except Exception:
+            pass
+    candidates = list(dict.fromkeys(candidates))
+    candidates.sort(key=len, reverse=True)            # longest name first
+    for name in candidates:
+        if name.lower() in text_low:
+            return name
+    for name in candidates:                            # last-name fallback
+        last = name.split()[-1].lower()
+        if len(last) > 2 and _re.search(rf"\b{_re.escape(last)}\b", text_low):
+            return name
+    return None
+
+
+def _find_players_in_text(text, season, limit=4):
+    """Every roster player named in the text, in order of appearance (deduped).
+    Used by the defender adjudicator, which needs more than one name."""
+    text_low = _norm(text)
+    candidates = []
+    for tm in (my_team, opponent):
+        try:
+            candidates += cached_roster_names(tm, season)
+        except Exception:
+            pass
+    candidates = list(dict.fromkeys(candidates))
+    found, used = [], []
+    for name in sorted(candidates, key=len, reverse=True):
+        idx = text_low.find(name.lower())
+        if idx == -1:
+            last = name.split()[-1].lower()
+            m = _re.search(rf"\b{_re.escape(last)}\b", text_low) if len(last) > 2 else None
+            idx = m.start() if m else -1
+        if idx == -1:
+            continue
+        span = (idx, idx + len(name))
+        if any(idx < u_end and span[1] > u_start for u_start, u_end in used):
+            continue                                   # overlaps an earlier match
+        used.append(span)
+        found.append((idx, name))
+    found.sort()
+    return [n for _, n in found][:limit]
+
+
+def _find_teams_in_text(text):
+    """Every league team named in the text, longest match first (deduped)."""
+    text_low = _norm(text)
+    found = [tm for tm in ALL_TEAMS if tm.lower() in text_low]
+    found.sort(key=len, reverse=True)
+    return list(dict.fromkeys(found))
+
+
+def _find_team_in_text(text):
+    found = _find_teams_in_text(text)
+    return found[0] if found else None
+
+
+def _classify_intent(text):
+    """Score every intent by keyword hits. A player-scoped intent beats a
+    team-wide one when both match (fix: 'shoot in the clutch' -> shot chart);
+    ties broken by _INTENT_PRIORITY. Defaults to a headline stat line."""
+    text_low = _norm(text)
+    scores = {}
+    for intent, keywords in _INTENT_KEYWORDS:
+        hits = sum(1 for kw in keywords if kw in text_low)
+        if hits:
+            scores[intent] = hits
+    if not scores:
+        return "headline"
+    player_scoped = {i: s for i, s in scores.items() if i not in _GLOBAL_INTENTS}
+    pool = player_scoped or scores
+    return max(pool, key=lambda i: (pool[i], -_INTENT_PRIORITY.index(i)))
+
+
+def _chat_team_for_player(player_name, season):
+    """Figure out which of the two sidebar teams a named player belongs to."""
+    for tm in (my_team, opponent):
+        try:
+            if player_name in cached_roster_names(tm, season):
+                return tm
+        except Exception:
+            continue
+    return my_team
+
+
+# ── Individual intent handlers — each returns (markdown_text, render_fn|None) ──
+def _handle_headline(player, season):
+    team = _chat_team_for_player(player, season)
+    try:
+        hs = cached_headline_stats(player, team, season)
+    except Exception as err:
+        return f"Couldn't pull season stats for **{player}**: {err}", None
+
+    def fmt(v):
+        return "—" if v is None else f"{v:.1f}"
+
+    pos = hs.get("position") or "—"
+    text = (
+        f"**{player}** ({team} · {pos}) is averaging **{fmt(hs.get('ppg'))} PPG**, "
+        f"**{fmt(hs.get('rpg'))} RPG**, and **{fmt(hs.get('apg'))} APG** this season."
+    )
+    return text, lambda: render_player_card(player, team, season)
+
+
+def _handle_advstats(player, season):
+    team = _chat_team_for_player(player, season)
+    try:
+        adv = cached_advanced_stats(player, team, season)
+    except Exception as err:
+        return f"Couldn't pull advanced stats for **{player}**: {err}", None
+    total = adv.get("total_players")
+
+    def pct(metric):
+        v = adv[metric]["value"]
+        r = adv[metric]["rank"]
+        if v is None:
+            return "—"
+        rank_str = f" (#{r} of {total})" if r and total else ""
+        return f"{v*100:.1f}%{rank_str}"
+
+    ortg_val = adv["off_rating"]["value"]
+    ortg_rank = adv["off_rating"]["rank"]
+    ortg_str = "—" if ortg_val is None else f"{ortg_val:.1f}"
+    if ortg_rank and total:
+        ortg_str += f" (#{ortg_rank} of {total})"
+
+    text = (
+        f"**{player}**'s advanced profile: True Shooting **{pct('ts_pct')}**, "
+        f"Usage **{pct('usg_pct')}**, Offensive Rating **{ortg_str}**."
+    )
+    return text, lambda: render_player_card(player, team, season)
+
+
+def _handle_shotchart(player, season):
+    team = _chat_team_for_player(player, season)
+    try:
+        shots = cached_shots(player, team, season)
+        summ  = cached_summary(player, team, season)
+    except Exception as err:
+        return f"Couldn't pull shot data for **{player}**: {err}", None
+    if shots.empty:
+        return f"No shot data found for **{player}** in {season}.", None
+
+    area = lowest_make_area_weighted(shots)
+    if area:
+        text = (
+            f"**Force {player} {area[0]}** — he shoots just **{area[1]:.1f}%** there. "
+            f"Overall he's taken **{summ['total_shots']} shots** at an average "
+            f"**{summ['avg_shot_distance']} ft**."
+        )
+    else:
+        text = (
+            f"**{player}** has taken **{summ['total_shots']} shots** this season at "
+            f"an average distance of **{summ['avg_shot_distance']} ft**."
+        )
+
+    def render():
+        try:
+            league_avgs = cached_league_shot_avgs(player, team, season)
+            _wrap_fig(hot_cold_shot_chart(shots, league_avgs),
+                      insight_text="Hex size = volume, colour = make% vs league avg.")
+        except Exception:
+            _wrap_fig(shot_chart_figure(shots))
+
+    return text, render
+
+
+def _handle_force(player, season):
+    team = _chat_team_for_player(player, season)
+    try:
+        shots = cached_shots(player, team, season)
+    except Exception as err:
+        return f"Couldn't pull shot data for **{player}**: {err}", None
+    if shots.empty:
+        return f"No shot data found for **{player}** to compute a force direction.", None
+    area = lowest_make_area_weighted(shots)
+    if not area:
+        return f"Not enough directional shot data for **{player}** yet.", None
+    label, pct, attempts = area
+    text = (
+        f"Force **{player}** **{label}** — he shoots only **{pct:.1f}%** "
+        f"from there across {attempts} attempts. That's his coldest zone."
+    )
+
+    def render():
+        fig = force_direction_chart(shots, label)
+        if fig is not None:
+            _wrap_fig(fig, insight_text="Red bar = the cold zone to force him to.")
+
+    return text, render
+
+
+def _handle_defend_rec(player, season):
+    # player here is the scoring threat; figure out which team they're on, then
+    # ask defend_takeaway who from the OTHER team should guard them.
+    target_team = _chat_team_for_player(player, season)
+    defending_team = my_team if target_team != my_team else opponent
+    tk = defend_takeaway(player, target_team, defending_team, season)
+    text = tk["sentence"] or f"No defensive recommendation available for {player} yet."
+    if tk.get("force"):
+        text += f" {tk['force']}"
+    return text, None
+
+
+def _handle_attack_rec(player, season):
+    team = _chat_team_for_player(player, season)
+    target_opp = opponent if team == my_team else my_team
+    tk = attack_takeaway(player, team, target_opp, season)
+    text = tk["sentence"] or f"No attacking edge found for {player} vs {target_opp} yet."
+    return text, None
+
+
+def _handle_fourfactors(text_raw, season):
+    # Honour teams named in the question; otherwise use the sidebar matchup.
+    teams_in = _find_teams_in_text(text_raw)
+    if len(teams_in) >= 2:
+        team_a, team_b = teams_in[0], teams_in[1]
+    elif len(teams_in) == 1:
+        team_a = teams_in[0]
+        team_b = opponent if team_a != opponent else my_team
+    else:
+        team_a, team_b = my_team, opponent
+    try:
+        my_ff  = cached_four_factors(team_a, season)
+        opp_ff = cached_four_factors(team_b, season)
+    except Exception as err:
+        return f"Couldn't pull Four Factors: {err}", None
+    text = (
+        f"Here's the **Four Factors** breakdown for **{team_a} vs {team_b}** "
+        f"({season}) — Effective FG%, Free-throw rate, Turnover %, and "
+        f"Offensive rebound %, with the better side highlighted."
+    )
+    return text, lambda: render_four_factors(team_a, team_b, my_ff, opp_ff)
+
+
+def _handle_clutch(text_raw, season):
+    # Honour a team named in the question; default to the scouted opponent.
+    team = _find_team_in_text(text_raw) or opponent
+    try:
+        clutch_data = cached_clutch_stats(team, season)
+    except Exception as err:
+        return f"Couldn't pull clutch stats for {team}: {err}", None
+    players = clutch_data.get("players", [])
+    if not players:
+        return f"No clutch data available for **{team}** in {season}.", None
+    names = [p["player"] for p in players]
+    lead  = f"{names[0]} and {names[1]}" if len(names) >= 2 else names[0]
+    text = (
+        f"**{team}**'s biggest clutch threats are **{lead}**. "
+        f"Plan your final-possession defence around them."
+    )
+
+    def render():
+        rows = []
+        for c in players[:5]:
+            pts = "—" if c["pts"] is None else f"{c['pts']:.1f}"
+            fg  = "—" if c["fg_pct"] is None else f"{c['fg_pct']*100:.1f}%"
+            rows.append([c["player"], pts, fg])
+        _html_table(["Player", "Clutch PTS/G", "Clutch FG%"], rows)
+
+    return text, render
+
+
+def _handle_compare(text_raw, season):
+    text_low = _norm(text_raw)
+    parts = _re.split(r"\bvs\b|\bversus\b", text_low)
+    if len(parts) < 2:
+        return "Tell me two players to compare, e.g. \"Compare Jaylen Brown vs Jalen Johnson\".", None
+    p1 = _find_player_in_text(parts[0], season)
+    p2 = _find_player_in_text(parts[1], season)
+    if not p1 or not p2:
+        return "I couldn't identify both players — try using their full names.", None
+    t1 = _chat_team_for_player(p1, season)
+    t2 = _chat_team_for_player(p2, season)
+    try:
+        adv1 = cached_advanced_stats(p1, t1, season)
+        adv2 = cached_advanced_stats(p2, t2, season)
+    except Exception as err:
+        return f"Couldn't pull comparison stats: {err}", None
+
+    def fmt_pct(adv, k):
+        v = adv[k]["value"]
+        return "—" if v is None else f"{v*100:.1f}%"
+
+    text = (
+        f"**{p1}** ({fmt_pct(adv1,'ts_pct')} TS%, {fmt_pct(adv1,'usg_pct')} USG%) "
+        f"vs **{p2}** ({fmt_pct(adv2,'ts_pct')} TS%, {fmt_pct(adv2,'usg_pct')} USG%)."
+    )
+
+    def render():
+        try:
+            _wrap_fig(comparison_radar(p1, t1, p2, t2, season),
+                      insight_text="Each axis = league percentile (0-100). Further out = better.")
+        except Exception:
+            pass
+
+    return text, render
+
+
+def _handle_compare_defenders(text_raw, season):
+    """Adjudicate "is A or B better on C?" — compare two defenders head-to-head
+    against one scorer and recommend the tougher matchup. Genuinely new vs the
+    ranked tables: it *decides* between two specific options a coach is weighing.
+    Returns (text, None), or None if it can't isolate the three players."""
+    low = _norm(text_raw)
+    if " or " not in low:
+        return None
+    left, right = low.split(" or ", 1)
+    rparts = _re.split(r"\b(?:on|against|guarding|guard|cover|covering|vs|versus)\b",
+                       right, maxsplit=1)
+    a = _find_player_in_text(left, season)
+    b = _find_player_in_text(rparts[0], season)
+    c = _find_player_in_text(rparts[1], season) if len(rparts) > 1 else None
+    if not (a and b and c):
+        return ("To compare defenders, ask like \"Is Holiday or White better on "
+                "Tatum?\" — name the two defenders and the scorer, using full names.",
+                None)
+
+    scorer_team = _chat_team_for_player(c, season)
+
+    def defender_result(defender):
+        # Real head-to-head first (the scorer's own matchup table), else project.
+        try:
+            mu = cached_matchups(c, season)
+            row = mu[mu["DEF_PLAYER_NAME"] == defender] if mu is not None else None
+            if row is not None and not row.empty:
+                r = row.iloc[0]
+                return {"kind": "observed",
+                        "ppp": float(r["PTS_PER_POSS"]),
+                        "poss": float(r["PARTIAL_POSS"])}
+        except Exception:
+            pass
+        try:
+            res = dp.project_matchup(c, scorer_team, defender, season)
+            if res and not res.get("insufficient"):
+                return {"kind": "projected", "score": res["score"], "label": res["label"]}
+        except Exception:
+            pass
+        return None
+
+    ra, rb = defender_result(a), defender_result(b)
+    if not ra and not rb:
+        return (f"I don't have enough matchup data on either **{a}** or **{b}** "
+                f"vs **{c}** to call it yet.", None)
+
+    def phrase(name, r):
+        if r is None:
+            return f"no usable matchup data on **{name}**"
+        if r["kind"] == "observed":
+            return (f"**{name}** held **{c}** to **{r['ppp']:.2f}**/poss over "
+                    f"{r['poss']:.0f} possessions")
+        return f"**{name}** projects **{r['label']}** (edge {r['score']:+.2f})"
+
+    def rank_val(r):                          # lower = tougher on the scorer
+        if r is None:
+            return 9.9
+        # Observed (~0.2–0.5 ppp) always beats projected (mapped to ~0.9–1.1).
+        return r["ppp"] if r["kind"] == "observed" else 1.0 + r["score"]
+
+    pick = a if rank_val(ra) <= rank_val(rb) else b
+    pick_r = ra if pick == a else rb
+
+    caveat = ""
+    if ra and rb and ra["kind"] == "observed" and rb["kind"] == "observed":
+        if abs(ra["ppp"] - rb["ppp"]) < 0.03:
+            bigger = a if ra["poss"] >= rb["poss"] else b
+            caveat = f" It's close — lean **{bigger}** on the larger sample."
+    elif pick_r and pick_r["kind"] == "projected":
+        caveat = " (Projected — neither has a big head-to-head sample yet.)"
+
+    text = f"**Put {pick} on {c}.** {phrase(a, ra)}; {phrase(b, rb)}.{caveat}"
+    return text, None
+
+
+def _handle_roster(text_raw, season):
+    team = _find_team_in_text(text_raw) or my_team
+    try:
+        names = cached_roster_names(team, season)
+    except Exception as err:
+        return f"Couldn't load the {team} roster: {err}", None
+    if not names:
+        return f"No roster data found for **{team}** in {season}.", None
+    listing = ", ".join(names[:14]) + (f" +{len(names)-14} more" if len(names) > 14 else "")
+    text = f"**{team}** roster ({season}): {listing}"
+    return text, None
+
+
+def route_chat_query(text_raw, season):
+    """Top-level entry point — classify intent, extract entities, dispatch.
+    Returns (response_markdown: str, render_fn: callable|None)."""
+    if not text_raw or not text_raw.strip():
+        return ("Ask me something like \"How does Jaylen Brown shoot?\" or "
+                "\"Is Holiday or White better on Tatum?\""), None
+
+    # Defender adjudication ("is A or B better on C?") — a decision the ranked
+    # tables don't answer directly. Detected before generic intent routing.
+    low = _norm(text_raw)
+    if (" or " in low
+            and _re.search(r"\b(on|against|guard|guarding|cover|covering|better)\b", low)
+            and len(_find_players_in_text(text_raw, season)) >= 2):
+        res = _handle_compare_defenders(text_raw, season)
+        if res is not None:
+            return res
+
+    intent = _classify_intent(text_raw)
+
+    if intent == "compare":
+        return _handle_compare(text_raw, season)
+    if intent == "roster":
+        return _handle_roster(text_raw, season)
+    if intent == "fourfactors":
+        return _handle_fourfactors(text_raw, season)
+    if intent == "clutch":
+        return _handle_clutch(text_raw, season)
+
+    # Remaining intents need a player name.
+    player = _find_player_in_text(text_raw, season)
+    if not player:
+        if intent == "defend_rec":
+            try:                               # sensible default: opponent's star
+                player = cached_top_scorer(opponent, season)
+            except Exception:
+                player = None
+        if not player:
+            return (f"I couldn't find a player name in that question. I can only "
+                    f"answer about players on **{my_team}** and **{opponent}** right "
+                    f"now — switch teams in the sidebar to ask about others. Try a "
+                    f"full name, e.g. \"How does Jaylen Brown shoot from the left?\""), None
+
+    if intent == "force":
+        return _handle_force(player, season)
+    if intent == "defend_rec":
+        return _handle_defend_rec(player, season)
+    if intent == "attack_rec":
+        return _handle_attack_rec(player, season)
+    if intent == "shotchart":
+        return _handle_shotchart(player, season)
+    if intent == "advstats":
+        return _handle_advstats(player, season)
+    return _handle_headline(player, season)
+
+
+# =============================================================================
 # TABS
 # =============================================================================
-tab_plan, tab_attack, tab_defend, tab_close = st.tabs([
+tab_plan, tab_attack, tab_defend, tab_close, tab_chat, tab_help = st.tabs([
     "Game Plan",
     "Attack",
     "Defend",
     "Close",
+    "Ask",
+    "Help",
 ])
 
 
@@ -2695,4 +3224,220 @@ with tab_close:
             st.caption(f"Share of his late shots by type. Clutch proxy: {prof['proxy']}.")
 
     render_glossary("close")
+
+
+# =============================================================================
+# TAB 5 — ASK  (keyword-routed Q&A over live data, no LLM)
+# =============================================================================
+with tab_chat:
+    st.markdown(
+        """<div class="chat-intro">
+            <div class="chat-intro-title">Ask the Scout</div>
+            <div class="chat-intro-body">
+                Ask a decision in plain English and get the <b>call first, then the
+                evidence</b> — including head-to-head verdicts like
+                <i>"Is Holiday or White better on Tatum?"</i>. It runs entirely on
+                keyword matching against the same live data powering the rest of the
+                dashboard — no external AI model, so every answer is grounded in real
+                pulled stats and never guessed. It can only answer about players on
+                the two teams selected in the sidebar.
+            </div>
+        </div>""",
+        unsafe_allow_html=True)
+
+    # Suggested questions built from the live sidebar context.
+    try:
+        _opp_star_chip = cached_top_scorer(opponent, season)
+    except Exception:
+        _opp_star_chip = opponent.split()[-1]
+    try:
+        _my_star_chip = cached_top_scorer(my_team, season)
+    except Exception:
+        _my_star_chip = my_team.split()[-1]
+
+    suggestions = [
+        f"How does {_opp_star_chip} shoot?",
+        f"Who should guard {_opp_star_chip}?",
+        f"Force direction for {_opp_star_chip}",
+        f"Four factors {my_team} vs {opponent}",
+        f"Clutch threats for {opponent}",
+        f"{_my_star_chip} vs {_opp_star_chip}",
+    ]
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    st.caption("Tap a suggested question, or type your own below.")
+    qcols = st.columns(3)
+    for i, s in enumerate(suggestions):
+        with qcols[i % 3]:
+            if st.button(s, key=f"chip_{i}", use_container_width=True):
+                st.session_state.chat_history.append({"role": "user", "content": s})
+                resp_text, render_fn = route_chat_query(s, season)
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": resp_text, "render": render_fn})
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    for msg in st.session_state.chat_history:
+        with st.chat_message("user" if msg["role"] == "user" else "assistant"):
+            if msg["role"] == "user":
+                st.markdown(msg["content"])
+            else:
+                # Convert **bold** to <strong> so it renders inside the styled
+                # HTML bubble (markdown isn't parsed inside raw block HTML).
+                _bubble = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>",
+                                  msg["content"])
+                st.markdown(f"<div class='bot-bubble'>{_bubble}</div>",
+                            unsafe_allow_html=True)
+                if msg.get("render"):
+                    try:
+                        msg["render"]()
+                    except Exception as err:
+                        st.caption(f"(Couldn't render the visual: {err})")
+                st.markdown(
+                    "<div class='bot-meta'>Answered via keyword routing over live "
+                    "data — no external AI model involved.</div>",
+                    unsafe_allow_html=True)
+
+    user_q = st.chat_input("Ask about a player, matchup, or stat…")
+    if user_q:
+        st.session_state.chat_history.append({"role": "user", "content": user_q})
+        resp_text, render_fn = route_chat_query(user_q, season)
+        st.session_state.chat_history.append(
+            {"role": "assistant", "content": resp_text, "render": render_fn})
+        st.rerun()
+
+    if st.session_state.chat_history:
+        if st.button("Clear conversation", key="clear_chat"):
+            st.session_state.chat_history = []
+            st.rerun()
+
+
+# =============================================================================
+# TAB 6 — HELP / FAQ  (static reference)
+# =============================================================================
+with tab_help:
+    st.markdown("#### Getting around Matchup Advantage")
+    st.markdown(
+        '<div class="help-search-note">Everything below is static reference '
+        'content — use Ctrl/Cmd+F to search this page.</div>',
+        unsafe_allow_html=True)
+
+    sec("Quick Start")
+    quick_steps = [
+        ("1", "Pick your two teams", "Use the sidebar — <b>My Team</b> is your roster, "
+         "<b>Opponent</b> is who you're scouting. Both selections drive every tab."),
+        ("2", "Choose a season", "Stats, matchups, and rosters all reload for the "
+         "season you pick. Defaults to the current season."),
+        ("3", "Start on Game Plan", "This tab gives you the at-a-glance offensive and "
+         "defensive recommendation before you dig into details."),
+        ("4", "Drill into Attack / Defend", "Pick a specific player from the sidebar "
+         "dropdowns, then click the generate button to pull the full report."),
+        ("5", "Ask anything", "The <b>Ask</b> tab answers plain-English questions about "
+         "either team using the same underlying data — no need to navigate manually."),
+    ]
+    for num, title, body in quick_steps:
+        st.markdown(
+            f"""<div class="help-step-card">
+                <div class="help-step-num">{num}</div>
+                <div>
+                    <div class="help-step-title">{title}</div>
+                    <div class="help-step-body">{body}</div>
+                </div>
+            </div>""",
+            unsafe_allow_html=True)
+
+    sec("Frequently Asked Questions")
+    FAQ_ITEMS = [
+        ("Navigation", "What does each tab do?",
+         "<b>Game Plan</b> — at-a-glance offensive/defensive recommendation and Four "
+         "Factors comparison. <b>Attack</b> — your player's best scoring matchups "
+         "against the opponent. <b>Defend</b> — full scouting report on an opponent "
+         "player, including who should guard them. <b>Close</b> — the opponent's "
+         "clutch-time scoring threats. <b>Ask</b> — type a question instead of "
+         "navigating manually. <b>Help</b> — this tab."),
+        ("Navigation", "Why is a tab showing an empty state?",
+         "The Attack and Defend tabs need a player selected in the sidebar first "
+         "(Scout / Attack sections), then you click the generate button inside the "
+         "tab itself. If no player is selected, you'll see a prompt instead of data."),
+        ("Data", "What does 'Actual' vs 'Projected' mean in tables?",
+         "<b>Actual</b> rows are real possessions the two players have logged "
+         "head-to-head this season. <b>Projected</b> rows are statistical estimates "
+         "used when two players haven't faced off enough to have reliable real data."),
+        ("Data", "Why do some players have no data?",
+         "Matchup data requires a minimum of ~40 possessions guarded to qualify for "
+         "most tables. Bench players or recent call-ups may not meet that threshold "
+         "yet, which is why projected matchups exist as a fallback."),
+        ("Data", "What is 'Edge score'?",
+         "A weighted FG% edge on a roughly −0.10 to +0.10 scale used in projected "
+         "matchups. Positive favours the scorer, negative favours the defender. "
+         "Within ±0.01 counts as Neutral; ±0.03 is a modest edge; ±0.08+ is strong."),
+        ("Data", "What counts as 'clutch'?",
+         "The NBA's standard definition: the last 5 minutes of a game with the score "
+         "within 5 points."),
+        ("Stats", "What is TS% / USG% / ORtg?",
+         "<b>TS%</b> (True Shooting) measures scoring efficiency across 2s, 3s, and "
+         "free throws combined. <b>USG%</b> (Usage) is the share of team plays a "
+         "player finishes while on the floor. <b>ORtg</b> (Offensive Rating) is "
+         "points the team scores per 100 possessions with that player on the floor. "
+         "All three show a league rank when available."),
+        ("Stats", "What is the 'Force Direction' chart?",
+         "It shows make% and shot volume by court side (Left / Centre / Right) for "
+         "a scouted player, highlighting their coldest zone in red — the direction "
+         "your defence should try to push them."),
+        ("Stats", "What does the hot/cold shot chart show?",
+         "Each hexagon represents a court zone. Hex size = shot volume from that "
+         "spot; colour = the player's make% there relative to the league average "
+         "(green = hot/above average, red = cold/below average). Faint grey hexes "
+         "are low-sample zones, shown small so they don't mislead."),
+        ("Ask Tab", "How does the Ask tab work without an AI model?",
+         "It uses keyword and pattern matching to detect your intent (e.g. "
+         "\"shoot\" → shot chart, \"guard\" → defensive recommendation) and the "
+         "player/team names you mention, then calls the exact same data functions "
+         "used elsewhere in the dashboard. The answer text is built from templates "
+         "filled with real numbers — nothing is generated freely, so it can't "
+         "invent stats."),
+        ("Ask Tab", "Can it decide between two defenders for me?",
+         "Yes — ask \"Is Holiday or White better on Tatum?\" (two defenders and the "
+         "scorer, full names). It compares each defender's real head-to-head result "
+         "against that scorer — points-per-possession allowed and sample size — and "
+         "recommends the tougher matchup, falling back to a projection when there's "
+         "no head-to-head data. Unlike the ranked tables, it gives you a single "
+         "verdict between the two options you're weighing."),
+        ("Ask Tab", "Why didn't it understand my question?",
+         "Try including a full player name and a clear keyword like \"shoot\", "
+         "\"guard\", \"force\", \"clutch\", or \"vs\" for comparisons. The matcher "
+         "looks for exact names from the current My Team / Opponent rosters, so "
+         "nicknames or misspellings won't resolve."),
+        ("Performance", "Why does the first load feel slow?",
+         "Every chart and table pulls from the NBA Stats API on first request. "
+         "Results are cached after that (via <code>st.cache_data</code>), so "
+         "repeated views of the same player/team/season combination are instant."),
+        ("Performance", "Why did a chart fail to load?",
+         "Some matchups have genuinely insufficient data (e.g. two players who've "
+         "barely shared the floor), and the NBA Stats API occasionally rate-limits "
+         "or times out. Most sections fail gracefully with a caption explaining "
+         "what went wrong rather than crashing the page."),
+    ]
+
+    _faq_cats = {}
+    for cat, q, a in FAQ_ITEMS:
+        _faq_cats.setdefault(cat, []).append((q, a))
+
+    for cat, items in _faq_cats.items():
+        st.markdown(f"##### {cat}")
+        for q, a in items:
+            with st.expander(q):
+                st.markdown(
+                    f"<span class='faq-cat-badge'>{cat}</span><br>"
+                    f"<div style='font-size:.92rem;color:{TEXT2};line-height:1.7;'>{a}</div>",
+                    unsafe_allow_html=True)
+
+    sec("Glossary (full)")
+    rows_html = "".join(
+        f'<div class="gloss-row"><div class="gloss-key">{GLOSSARY[k][0]}</div>'
+        f'<div class="gloss-val">{GLOSSARY[k][1]}</div></div>'
+        for k in GLOSSARY)
+    st.markdown(rows_html, unsafe_allow_html=True)
 
